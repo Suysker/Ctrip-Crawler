@@ -5,14 +5,13 @@ import time
 import json
 import random
 import requests
-#import proxypool
 import threading
 import pandas as pd
 from seleniumwire import webdriver
 from datetime import datetime as dt,timedelta
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-
+from selenium.common.exceptions import TimeoutException,StaleElementReferenceException,ElementNotInteractableException,ElementClickInterceptedException # 加载异常
 
 
 def getcitycode():
@@ -46,7 +45,15 @@ class FLIGHT(object):
     def __init__(self):
         self.url = 'https://flights.ctrip.com/online/list/oneway' #携程机票查询页面
         self.chromeDriverPath = 'C:/Program Files/Google/Chrome/Application/chromedriver' #chromedriver位置
-        self.driver = webdriver.Chrome(executable_path=self.chromeDriverPath)
+        self.options = webdriver.ChromeOptions() # 创建一个配置对象
+        #self.options.add_argument('--incognito')  # 隐身模式（无痕模式）
+        #self.options.add_argument('User-Agent=%s'%UserAgent().random) # 替换User-Agent
+        self.options.add_argument("--disable-blink-features")
+        self.options.add_argument("--disable-blink-features=AutomationControlled")
+        self.options.add_experimental_option("excludeSwitches", ['enable-automation'])# 不显示正在受自动化软件控制
+        self.driver = webdriver.Chrome(executable_path=self.chromeDriverPath,chrome_options=self.options)
+        self.driver.maximize_window()
+        self.err=0#错误重试次数
           
     
     def getpage(self): 
@@ -61,7 +68,6 @@ class FLIGHT(object):
         self.driver.set_page_load_timeout(300)
         try:
             self.driver.get(flights_url)
-            self.driver.maximize_window()
         except:
             print('页面连接失败')
             self.driver.close()
@@ -70,7 +76,6 @@ class FLIGHT(object):
             try:
                 ##############判断是否存在验证码
                 self.driver.find_element(By.CLASS_NAME,"basic-alert.alert-giftinfo")
-                self.driver.close()
                 print('等待2小时后重试')
                 time.sleep(7200)
                 self.getpage()
@@ -113,11 +118,25 @@ class FLIGHT(object):
                 its[1].send_keys(self.city[1])
             
             time.sleep(0.5)
-            self.driver.implicitly_wait(5) # seconds
-            #通过低价提醒按钮实现enter键换页
-            self.driver.find_elements(By.CLASS_NAME,'low-price-remind')[0].click()
+            try:
+                #通过低价提醒按钮实现enter键换页
+                self.driver.implicitly_wait(5) # seconds
+                self.driver.find_elements(By.CLASS_NAME,'low-price-remind')[0].click()
+            except IndexError as e:
+                print('\n更换城市错误 找不到元素',e)
+                #以防万一
+                its[1].send_keys(Keys.ENTER)
             
             print('\n更换城市成功',self.city[0]+'-'+self.city[1])
+        except (ElementNotInteractableException,StaleElementReferenceException,ElementClickInterceptedException,ElementClickInterceptedException) as e:
+            print('\n更换城市错误 元素错误',e)
+            self.err+=1
+            if self.err<=5:
+                self.click_btn()
+            else:
+                self.err=0
+                del self.driver.requests
+                self.getpage()
         except Exception as e:
             print('\n更换城市错误',e)
             #删除本次请求
@@ -126,29 +145,36 @@ class FLIGHT(object):
             self.getpage()
         else:
             #若无错误，执行下一步
-            self.getdata()
-                
+            self.getdata()           
             
             
     
     def getdata(self):
-        #等待响应加载完成
-        self.predata = self.driver.wait_for_request('/international/search/api/search/batchSearch?.*', timeout=30)
+        try:
+            #等待响应加载完成
+            self.predata = self.driver.wait_for_request('/international/search/api/search/batchSearch?.*', timeout=60)
         
-        rb=dict(json.loads(self.predata.body).get('flightSegments')[0])
+            rb=dict(json.loads(self.predata.body).get('flightSegments')[0])
         
-        #检查数据获取正确性
-        if rb['departureCityName'] == self.city[0] and rb['arrivalCityName'] == self.city[1]:
-            print('城市获取正确')
+        except TimeoutException as e:
+            print('\获取数据错误',e)
             #删除本次请求
             del self.driver.requests
-            #若无错误，执行下一步
-            self.decode_data()
+            #从头开始重新执行程序
+            self.getpage()
         else:
-            #删除本次请求
-            del self.driver.requests
-            #重新更换城市
-            self.changecity()
+            #检查数据获取正确性
+            if rb['departureCityName'] == self.city[0] and rb['arrivalCityName'] == self.city[1]:
+                print('城市获取正确')
+                #删除本次请求
+                del self.driver.requests
+                #若无错误，执行下一步
+                self.decode_data()
+            else:
+                #删除本次请求
+                del self.driver.requests
+                #重新更换城市
+                self.changecity()
     
     
     
@@ -350,7 +376,7 @@ class FLIGHT(object):
     def demain(self,citys,citycode):
         self.citycode=citycode
         #设置出发日期
-        self.date=dt.now()+timedelta(days=1)
+        self.date=dt.now()+timedelta(days=7)
         self.date=self.date.strftime('%Y-%m-%d')
         
         for city in citys:
@@ -379,58 +405,6 @@ if __name__ == '__main__':
                 continue
             else:
                 citys.append([m,n])
-    citys+=[['杭州', '武汉'],
-     ['杭州', '天津'],
-     ['杭州', '厦门'],
-     ['杭州', '成都'],
-     ['成都', '武汉'],
-     ['成都', '天津'],
-     ['成都', '厦门'],
-     ['成都', '杭州'],
-     ['厦门', '武汉'],
-     ['厦门', '天津'],
-     ['厦门', '成都'],
-     ['厦门', '杭州'],
-     ['天津', '武汉'],
-     ['天津', '厦门'],
-     ['天津', '成都'],
-     ['天津', '杭州'],
-     ['武汉', '天津'],
-     ['武汉', '厦门'],
-     ['武汉', '成都'],
-     ['武汉', '杭州'],
-     ['杭州', '西安'],
-     ['杭州', '桂林'],
-     ['杭州', '重庆'],
-     ['杭州', '长沙'],
-     ['杭州', '三亚'],
-     ['成都', '西安'],
-     ['成都', '桂林'],
-     ['成都', '重庆'],
-     ['成都', '长沙'],
-     ['成都', '三亚'],
-     ['厦门', '西安'],
-     ['厦门', '桂林'],
-     ['厦门', '重庆'],
-     ['厦门', '长沙'],
-     ['厦门', '三亚'],
-     ['天津', '西安'],
-     ['天津', '桂林'],
-     ['天津', '重庆'],
-     ['天津', '长沙'],
-     ['天津', '三亚'],
-     ['武汉', '西安'],
-     ['武汉', '桂林'],
-     ['武汉', '重庆'],
-     ['武汉', '长沙'],
-     ['武汉', '三亚'],
-     ['上海', '兰州'],
-     ['北京', '贵阳'],
-     ['杭州', '兰州'],
-     ['西安', '贵阳'],
-     ['西安', '成都'],
-     ['上海', '成都']]
-    
     fly = FLIGHT()
     fly.demain(citys,citycode)
     print('\n程序运行完成！！！！')    
