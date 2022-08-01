@@ -145,6 +145,7 @@ class FLIGHT(object):
             self.getpage()
         else:
             #若无错误，执行下一步
+            self.err=0
             self.getdata()           
             
             
