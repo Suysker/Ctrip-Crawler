@@ -81,7 +81,7 @@ class FLIGHT(object):
         self.remove_btn()
         
         try:
-        	#获取出发地与目的地元素位置
+            #获取出发地与目的地元素位置
             its=self.driver.find_elements(By.CLASS_NAME,'form-input-v3')
             
             #若出发地与目标值不符，则更改出发地
@@ -139,7 +139,7 @@ class FLIGHT(object):
     def getdata(self):
         try:
             #等待响应加载完成
-            self.predata = self.driver.wait_for_request('/international/search/api/search/batchSearch?.*', timeout=60)
+            self.predata = self.driver.wait_for_request('/international/search/api/search/batchSearch?.*', timeout=30)
         
             rb=dict(json.loads(self.predata.body).get('flightSegments')[0])
         
