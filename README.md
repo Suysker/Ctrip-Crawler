@@ -11,3 +11,5 @@
 [基于selenium的携程机票爬取程序](https://blog.suysker.xyz/archives/35)
 
 [基于request的航班历史票价爬取](https://blog.suysker.xyz/archives/36)
+
+V2版本优化了直接通关链接请求导致验证码出现的问题
