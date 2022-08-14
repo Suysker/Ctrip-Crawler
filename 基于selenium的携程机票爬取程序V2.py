@@ -32,7 +32,7 @@ class FLIGHT(object):
     
     def getpage(self): 
         try:
-            self.driver.find_element(By.CLASS_NAME,'pc_home-jipiao.lsn_top_nav_icon_ijnym').click()#点击飞机图标，返回主界面
+            self.driver.find_element(By.CLASS_NAME,'pc_home-jipiao').click()#点击飞机图标，返回主界面
             self.driver.implicitly_wait(5) # seconds
             self.driver.find_elements(By.CLASS_NAME,'radio-label')[0].click()#单程
             
