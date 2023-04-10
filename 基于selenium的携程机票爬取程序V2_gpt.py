@@ -9,7 +9,9 @@ from seleniumwire import webdriver
 from datetime import datetime as dt,timedelta
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import TimeoutException,StaleElementReferenceException,ElementNotInteractableException,ElementClickInterceptedException # 加载异常
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementNotInteractableException,StaleElementReferenceException, ElementClickInterceptedException # 加载异常
 
 
 
@@ -30,41 +32,40 @@ class FLIGHT(object):
 
           
     
-    def getpage(self): 
+    def getpage(self):
         try:
-            self.driver.find_element(By.CLASS_NAME,'pc_home-jipiao').click()#点击飞机图标，返回主界面
-            self.driver.implicitly_wait(5) # seconds
-            self.driver.find_elements(By.CLASS_NAME,'radio-label')[0].click()#单程
-            
-            while self.driver.find_elements(By.CSS_SELECTOR,"[aria-label=请选择日期]")[0].get_attribute("value") != self.date:
-                
-                self.driver.find_element(By.CLASS_NAME,'modifyDate.depart-date').click()#点击日期选择
-                
-                for m in self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block'):
-                    
-                    if int(m.find_element(By.CLASS_NAME,'month').text[:-1]) != int(self.date[5:7]):
+            self.wait.until(EC.element_to_be_clickable((By.CLASS_NAME, 'pc_home-jipiao'))).click()  # 点击飞机图标，返回主界面
+            self.wait.until(EC.element_to_be_clickable((By.CLASS_NAME, 'radio-label'))).click()  # 单程
+
+            while self.driver.find_elements(By.CSS_SELECTOR, "[aria-label=请选择日期]")[0].get_attribute("value") != self.date:
+
+                self.wait.until(EC.element_to_be_clickable((By.CLASS_NAME, 'modifyDate.depart-date'))).click()  # 点击日期选择
+
+                for m in self.wait.until(EC.presence_of_all_elements_located((By.CLASS_NAME, 'date-picker.date-picker-block'))):
+
+                    if int(m.find_element(By.CLASS_NAME, 'month').text[:-1]) != int(self.date[5:7]):
                         continue
-                    
-                    for d in m.find_elements(By.CLASS_NAME,'date-d'):
+
+                    for d in m.find_elements(By.CLASS_NAME, 'date-d'):
                         if int(d.text) == int(self.date[-2:]):
                             d.click()
-                            break                    
-            
-            self.driver.find_element(By.CLASS_NAME,'search-btn').click()#搜索        
-            
+                            break
+
+            self.wait.until(EC.element_to_be_clickable((By.CLASS_NAME, 'search-btn'))).click()  # 搜索
+
         except:
             print('页面连接失败')
             self.driver.close()
             self.getpage()
         else:
             try:
-                ##############判断是否存在验证码
-                self.driver.find_element(By.ID,"verification-code")
+                # 判断是否存在验证码
+                self.driver.find_element(By.ID, "verification-code")
                 print('等待2小时后重试')
                 time.sleep(7200)
                 self.getpage()
             except:
-                ##############不存在验证码，执行下一步
+                # 不存在验证码，执行下一步
                 self.changecity()
 
     def remove_btn(self):
@@ -82,7 +83,7 @@ class FLIGHT(object):
         
         try:
             #获取出发地与目的地元素位置
-            its=self.driver.find_elements(By.CLASS_NAME,'form-input-v3')
+            its = WebDriverWait(self.driver, 10).until(EC.presence_of_all_elements_located((By.CLASS_NAME, 'form-input-v3')))
             
             #若出发地与目标值不符，则更改出发地
             while self.city[0] not in its[0].get_attribute('value'):    
@@ -381,17 +382,21 @@ class FLIGHT(object):
 
 
 if __name__ == '__main__':
-    citys=[]
-    city=['上海','广州','深圳','北京']
-    #形成城市对
-    ytic=list(reversed(city))
+    citys = []
+    city = ['上海', '广州', '深圳', '北京']
+    # 形成城市对
+    ytic = list(reversed(city))
     for m in city:
         for n in ytic:
-            if m==n:
+            if m == n:
                 continue
             else:
-                citys.append([m,n])
+                citys.append([m, n])
+
+    # Use permutations instead of nested loops
+    citys = list(permutations(city, 2))
+
     fly = FLIGHT()
     fly.demain(citys)
-    print('\n程序运行完成！！！！')    
+    print('\n程序运行完成！！！！')  
     
