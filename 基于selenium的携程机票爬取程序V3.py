@@ -1,3 +1,4 @@
+import magic
 import io
 import os
 import gzip
