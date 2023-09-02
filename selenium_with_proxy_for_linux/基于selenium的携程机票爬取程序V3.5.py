@@ -1,3 +1,5 @@
+import gen_proxy_servers
+import magic
 import io
 import os
 import gzip
@@ -8,6 +10,7 @@ from seleniumwire import webdriver
 from datetime import datetime as dt,timedelta
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException,StaleElementReferenceException,ElementNotInteractableException,ElementClickInterceptedException # 加载异常
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -16,7 +19,6 @@ crawal_citys = ['上海', '广州', '深圳', '北京']
 
 # 设置各城市爬取的时间间隔（单位：秒）
 crawal_interval = 5
-
 # 设置页面加载的最长等待时间（单位：秒）
 max_wait_time = 10
 
@@ -29,21 +31,41 @@ del_info = False
 # 是否重命名DataFrame的列名
 rename_col = True
 
+#开启代理
+enable_proxy=True
+
+#生成代理IPV6数量
+ipv6_count=100
+
+#起始端口
+start_port=20000
+
+#服务端口
+proxy_port=10000
+
+#服务器地址
+proxy_address='127.0.0.1'
+
+#生成的IPV6接口名称
+base_interface='eth0'
+
+def kill_driver():
+    os.system('''ps -ef | grep chrome | grep -v grep | awk '{print "kill -9" $2}'| sh''')
+
 def init_driver():
-    #chromeDriverPath = 'C:/Program Files/Google/Chrome/Application/chromedriver' #chromedriver位置
-    #options = webdriver.ChromeOptions() # 创建一个配置对象
-    options = webdriver.EdgeOptions() # 创建一个配置对象
+    options = webdriver.ChromeOptions()  # 创建一个配置对象
+    if enable_proxy:
+        options.add_argument(f"--proxy-server=http://{proxy_address}:{proxy_port}")  # 指定代理服务器和端口
     options.add_argument('--incognito')  # 隐身模式（无痕模式）
-    #options.add_argument('--headless')  # 启用无头模式
+    options.add_argument('--headless')  # 启用无头模式
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument("--disable-blink-features")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ['enable-automation'])  # 不显示正在受自动化软件控制的提示
     #options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/116.0.1938.69")
-    options.add_experimental_option("excludeSwitches", ['enable-automation'])# 不显示正在受自动化软件控制
-    #driver = webdriver.Chrome(executable_path=self.chromeDriverPath,chrome_options=self.options)
-    driver = webdriver.Edge(options=options)
-    driver.set_page_load_timeout(300)#设置加载超时阈值
+    driver = webdriver.Chrome(options=options)
+    driver.set_page_load_timeout(300)  # 设置加载超时阈值
     driver.maximize_window()
 
     return driver
@@ -85,6 +107,7 @@ class DataFetcher(object):
 
     def remove_btn(self):
         try:
+            WebDriverWait(self.driver, max_wait_time).until(lambda d: d.execute_script('return typeof jQuery !== "undefined"'))
             js_remove="$('.notice-box').remove();"
             self.driver.execute_script(js_remove)
         except Exception as e:
@@ -99,6 +122,7 @@ class DataFetcher(object):
             #移除提醒
             self.remove_btn()
             
+            WebDriverWait(self.driver, max_wait_time).until(EC.presence_of_element_located((By.CLASS_NAME, 'pc_home-jipiao')))
             #点击飞机图标，返回主界面
             ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CLASS_NAME,'pc_home-jipiao')))
             ele.click()
@@ -130,8 +154,8 @@ class DataFetcher(object):
         except Exception as e:
             # 用f字符串格式化错误类型和错误信息，提供更多的调试信息
             print(f'页面加载或元素操作失败，错误类型：{type(e).__name__}, 详细错误信息：{e}')
-            self.driver.close()
             # 重新尝试加载页面，这次指定需要重定向到首页
+            #self.driver.close()
             self.get_page(1)
         else:
             try:
@@ -182,7 +206,7 @@ class DataFetcher(object):
                     #ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(its[1]))
                     #ele.send_keys(Keys.ENTER)
                     
-                    #移除提醒
+                    #移除提醒提醒
                     self.remove_btn()
                     
                     #通过低价提醒按钮实现enter键换页
@@ -206,7 +230,7 @@ class DataFetcher(object):
                 del self.driver.requests
                 self.get_page()
         except Exception as e:
-            print(f'更换城市失败，错误类型：{type(e).__name__}, 错误信息：{e}')
+            print(f'更换城市失败，错误类型：{type(e).__name__}, 错误信息：{e}')         
             #删除本次请求
             del self.driver.requests
             #从头开始重新执行程序
@@ -431,8 +455,12 @@ class DataFetcher(object):
             print('合并数据失败',e)
 
 
-
 if __name__ == '__main__':
+    
+    kill_driver()
+    
+    if enable_proxy:
+        gen_proxy_servers.start_proxy_servers(ipv6_count,start_port,proxy_port,base_interface)
 
     driver=init_driver()
     
@@ -455,9 +483,16 @@ if __name__ == '__main__':
         if Flight_DataFetcher.dedata:
             Flight_DataFetcher.check_data()
             
+        #更换IPV6地址
+        if enable_proxy:
+            gen_proxy_servers.switch_http_server()
+            
         time.sleep(crawal_interval)
         
     #运行结束退出
     driver.quit()
+    
+    if enable_proxy:
+        gen_proxy_servers.stop_proxy_servers(ipv6_count,base_interface)
 
     print('\n程序运行完成！！！！')    
