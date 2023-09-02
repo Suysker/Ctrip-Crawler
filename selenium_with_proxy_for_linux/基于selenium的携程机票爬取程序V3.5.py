@@ -485,7 +485,7 @@ if __name__ == '__main__':
             
         #更换IPV6地址
         if enable_proxy:
-            gen_proxy_servers.switch_http_server()
+            gen_proxy_servers.switch_proxy_server()
             
         time.sleep(crawal_interval)
         

@@ -17,7 +17,7 @@ def interface_exists(interface_name):
     cmd_result = subprocess.run(["ip", "link", "show", interface_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return cmd_result.returncode == 0
 
-def switch_http_server():
+def switch_proxy_server():
     global global_flag  # Use the global flag variable
     global_flag = 1
 
