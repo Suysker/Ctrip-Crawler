@@ -110,6 +110,28 @@ class DataFetcher(object):
         except Exception as e:
             print('提醒移除失败',str(e).split("Stacktrace:")[0])
 
+    def check_verification_code(self):
+        try:
+            # 检查是否有验证码元素，如果有，则需要人工处理
+            self.driver.find_element(By.ID, "verification-code")
+            print('验证码被触发，等待2小时后或人工处理再进行重试。')
+            time.sleep(7200)
+            self.driver.quit()
+            self.driver=init_driver()
+            self.get_page(1)
+        except:
+            try:
+                self.driver.find_element(By.CLASS_NAME, "alert-title")
+                print('验证码被触发，等待2小时后或人工处理再进行重试。')
+                time.sleep(7200)
+                self.driver.quit()
+                self.driver=init_driver()
+                self.get_page(1)
+            except:
+                # 如果没有找到验证码元素，则说明页面加载成功，没有触发验证码
+                print('页面成功加载，未触发验证码，即将进行下一步操作。')
+
+
     def get_page(self,reset_to_homepage=0): 
         try:
             if reset_to_homepage == 1:
@@ -139,19 +161,8 @@ class DataFetcher(object):
             # 重新尝试加载页面，这次指定需要重定向到首页
             self.get_page(1)
         else:
-            try:
-                # 检查是否有验证码元素，如果有，则需要人工处理
-                self.driver.find_element(By.ID, "verification-code")
-                print('验证码被触发，等待2小时后或人工处理再进行重试。')
-                self.driver.quit()
-                time.sleep(7200)
-                self.driver=init_driver()
-                self.get_page(1)
-            except:
-                # 如果没有找到验证码元素，则说明页面加载成功，没有触发验证码
-                print('页面成功加载，未触发验证码，即将进行下一步操作。')
-                if self.city:
-                    self.change_city()
+            # 检查是否有验证码元素，如果有，则需要人工处理
+            self.check_verification_code()
 
     def change_city(self):
         
@@ -219,17 +230,9 @@ class DataFetcher(object):
             print(f'成功更换城市，当前路线为：{self.city[0]}-{self.city[1]}')
         #捕获错误
         except (IndexError,ElementNotInteractableException,StaleElementReferenceException,ElementClickInterceptedException,ElementClickInterceptedException) as e:
-
-            try:
-                # 检查是否有验证码元素，如果有，则需要人工处理
-                self.driver.find_element(By.CLASS_NAME, "alert-title")
-                print('验证码被触发，等待2小时后或人工处理再进行重试。')
-                self.driver.quit()
-                time.sleep(7200)
-                self.driver=init_driver()
-                self.get_page(1)
-            except:
-                print('')
+            
+            # 检查是否有验证码元素，如果有，则需要人工处理
+            self.check_verification_code()
         
             print(f'更换城市失败，错误类型：{type(e).__name__}, 错误信息：{str(e).split("Stacktrace:")[0]}')
             self.err+=1
@@ -239,12 +242,14 @@ class DataFetcher(object):
                 self.err=0
                 del self.driver.requests
                 self.get_page()
+                self.change_city()
         except Exception as e:
             print(f'更换城市失败，错误类型：{type(e).__name__}, 错误信息：{str(e).split("Stacktrace:")[0]}')
             #删除本次请求
             del self.driver.requests
             #从头开始重新执行程序
             self.get_page()
+            self.change_city()
         else:
             #若无错误，执行下一步
             self.err=0
@@ -263,6 +268,7 @@ class DataFetcher(object):
             del self.driver.requests
             #从头开始重新执行程序
             self.get_page()
+            self.change_city()
         else:
             #检查数据获取正确性
             if rb['departureCityName'] == self.city[0] and rb['arrivalCityName'] == self.city[1]:
@@ -298,18 +304,11 @@ class DataFetcher(object):
         except Exception as e:
             print(f'数据解码失败，错误类型：{type(e).__name__}, 错误详细：{str(e).split("Stacktrace:")[0]}')
 
-            try:
-                # 检查是否有验证码元素，如果有，则需要人工处理
-                self.driver.find_element(By.CLASS_NAME, "alert-title")
-                print('验证码被触发，等待2小时后或人工处理再进行重试。')
-                self.driver.quit()
-                time.sleep(7200)
-                self.driver=init_driver()
-                self.get_page(1)
-            except:
-                print('')
+            # 检查是否有验证码元素，如果有，则需要人工处理
+            self.check_verification_code()
             
             self.get_page()
+            self.change_city()
             
     def check_data(self):
         try:
