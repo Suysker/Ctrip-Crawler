@@ -1,3 +1,4 @@
+import magic
 import io
 import os
 import gzip
@@ -8,14 +9,21 @@ from seleniumwire import webdriver
 from datetime import datetime as dt,timedelta
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException,StaleElementReferenceException,ElementNotInteractableException,ElementClickInterceptedException # 加载异常
 from selenium.webdriver.support.ui import WebDriverWait
 
-
+#爬取的城市
 crawal_citys = ['上海', '广州', '深圳', '北京']
+
+#爬取的日期
+crawal_days =60
 
 # 设置各城市爬取的时间间隔（单位：秒）
 crawal_interval = 5
+
+#日期间隔
+days_interval = 5
 
 # 设置页面加载的最长等待时间（单位：秒）
 max_wait_time = 10
@@ -60,6 +68,17 @@ def gen_citys(crawal_citys):
                 citys.append([m, n])
     return citys
 
+def generate_flight_dates(n, days_interval):
+    
+    flight_dates = []
+    
+    for i in range(0, n, days_interval):
+        
+        flight_date = dt.now() + timedelta(days=i + 1)
+        
+        flight_dates.append(flight_date.strftime('%Y-%m-%d'))
+    
+    return flight_dates
 
 #element_to_be_clickable 函数来替代 expected_conditions.element_to_be_clickable 或 expected_conditions.visibility_of_element_located
 def element_to_be_clickable(element):
@@ -74,9 +93,9 @@ def element_to_be_clickable(element):
     return check_clickable
 
 class DataFetcher(object):
-    def __init__(self,driver,date):
+    def __init__(self,driver):
         self.driver=driver
-        self.date=date
+        self.date=None
         self.city=None
         self.err=0#错误重试次数
         self.flights = pd.DataFrame()
@@ -85,20 +104,22 @@ class DataFetcher(object):
 
     def remove_btn(self):
         try:
+            WebDriverWait(self.driver, max_wait_time).until(lambda d: d.execute_script('return typeof jQuery !== "undefined"'))
             js_remove="$('.notice-box').remove();"
             self.driver.execute_script(js_remove)
         except Exception as e:
-            print('提醒移除失败',e)
+            print('提醒移除失败',str(e).split("Stacktrace:")[0])
 
     def get_page(self,reset_to_homepage=0): 
         try:
             if reset_to_homepage == 1:
                 #前往首页
-                driver.get('https://flights.ctrip.com/online/channel/domestic')
+                self.driver.get('https://flights.ctrip.com/online/channel/domestic')
             
             #移除提醒
             self.remove_btn()
             
+            WebDriverWait(self.driver, max_wait_time).until(EC.presence_of_element_located((By.CLASS_NAME, 'pc_home-jipiao')))
             #点击飞机图标，返回主界面
             ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CLASS_NAME,'pc_home-jipiao')))
             ele.click()
@@ -106,31 +127,15 @@ class DataFetcher(object):
             #单程
             ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'radio-label')[0]))
             ele.click()
-            
-            while self.driver.find_elements(By.CSS_SELECTOR,"[aria-label=请选择日期]")[0].get_attribute("value") != self.date:
-                
-                #点击日期选择
-                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CLASS_NAME,'modifyDate.depart-date')))
-                ele.click()
-                
-                for m in self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block'):
-                    
-                    if int(m.find_element(By.CLASS_NAME,'month').text[:-1]) != int(self.date[5:7]):
-                        continue
-                    
-                    for d in m.find_elements(By.CLASS_NAME,'date-d'):
-                        if int(d.text) == int(self.date[-2:]):
-                            ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(d))
-                            ele.click()
-                            break                    
+                           
             #搜索
             ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CLASS_NAME,'search-btn')))
             ele.click()
             
         except Exception as e:
             # 用f字符串格式化错误类型和错误信息，提供更多的调试信息
-            print(f'页面加载或元素操作失败，错误类型：{type(e).__name__}, 详细错误信息：{e}')
-            self.driver.close()
+            print(f'页面加载或元素操作失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}')
+            #self.driver.close()
             # 重新尝试加载页面，这次指定需要重定向到首页
             self.get_page(1)
         else:
@@ -138,8 +143,9 @@ class DataFetcher(object):
                 # 检查是否有验证码元素，如果有，则需要人工处理
                 self.driver.find_element(By.ID, "verification-code")
                 print('验证码被触发，等待2小时后或人工处理再进行重试。')
-                self.driver.close()
+                self.driver.quit()
                 time.sleep(7200)
+                self.driver=init_driver()
                 self.get_page(1)
             except:
                 # 如果没有找到验证码元素，则说明页面加载成功，没有触发验证码
@@ -156,6 +162,7 @@ class DataFetcher(object):
             #获取出发地与目的地元素位置
             #its=self.driver.find_elements(By.CLASS_NAME,'form-input-v3')
             
+            WebDriverWait(self.driver, max_wait_time).until(EC.presence_of_element_located((By.CLASS_NAME, 'form-input-v3')))
             #若出发地与目标值不符，则更改出发地
             while self.city[0] not in self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[0].get_attribute('value'):    
                 ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[0]))
@@ -165,7 +172,6 @@ class DataFetcher(object):
                 ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[0]))
                 ele.send_keys(self.city[0])
                 
-
             #若目的地与目标值不符，则更改目的地
             while self.city[1] not in self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1].get_attribute('value'):
                 ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1]))
@@ -174,6 +180,22 @@ class DataFetcher(object):
                 ele.send_keys(Keys.CONTROL + 'a')
                 ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1]))
                 ele.send_keys(self.city[1])
+
+            while self.driver.find_elements(By.CSS_SELECTOR,"[aria-label=请选择日期]")[0].get_attribute("value") != self.date:
+                #点击日期选择
+                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CLASS_NAME,'modifyDate.depart-date')))
+                ele.click()
+                
+                for m in self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block'):
+                    
+                    if int(m.find_element(By.CLASS_NAME,'month').text[:-1]) != int(self.date[5:7]):
+                        continue
+                    
+                    for d in m.find_elements(By.CLASS_NAME,'date-d'):
+                        if int(d.text) == int(self.date[-2:]):
+                            ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(d))
+                            ele.click()
+                            break     
                 
             # 验证目的地名称是否完整
             try:
@@ -189,7 +211,7 @@ class DataFetcher(object):
                     ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'low-price-remind')[0]))
                     ele.click()
             except IndexError as e:
-                print(f'更换城市失败，错误类型：{type(e).__name__}, 错误信息：{e}')
+                print(f'更换城市失败，错误类型：{type(e).__name__}, 错误信息：{str(e).split("Stacktrace:")[0]}')
                 #以防万一
                 ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1]))
                 ele.send_keys(Keys.ENTER)
@@ -197,7 +219,19 @@ class DataFetcher(object):
             print(f'成功更换城市，当前路线为：{self.city[0]}-{self.city[1]}')
         #捕获错误
         except (IndexError,ElementNotInteractableException,StaleElementReferenceException,ElementClickInterceptedException,ElementClickInterceptedException) as e:
-            print(f'更换城市失败，错误类型：{type(e).__name__}, 错误信息：{e}')
+
+            try:
+                # 检查是否有验证码元素，如果有，则需要人工处理
+                self.driver.find_element(By.CLASS_NAME, "alert-title")
+                print('验证码被触发，等待2小时后或人工处理再进行重试。')
+                self.driver.quit()
+                time.sleep(7200)
+                self.driver=init_driver()
+                self.get_page(1)
+            except:
+                print('')
+        
+            print(f'更换城市失败，错误类型：{type(e).__name__}, 错误信息：{str(e).split("Stacktrace:")[0]}')
             self.err+=1
             if self.err<=5:
                 self.change_city()
@@ -206,7 +240,7 @@ class DataFetcher(object):
                 del self.driver.requests
                 self.get_page()
         except Exception as e:
-            print(f'更换城市失败，错误类型：{type(e).__name__}, 错误信息：{e}')
+            print(f'更换城市失败，错误类型：{type(e).__name__}, 错误信息：{str(e).split("Stacktrace:")[0]}')
             #删除本次请求
             del self.driver.requests
             #从头开始重新执行程序
@@ -224,7 +258,7 @@ class DataFetcher(object):
             rb=dict(json.loads(self.predata.body).get('flightSegments')[0])
         
         except TimeoutException as e:
-            print(f'获取数据超时，错误类型：{type(e).__name__}, 错误详细：{e}')
+            print(f'获取数据超时，错误类型：{type(e).__name__}, 错误详细：{str(e).split("Stacktrace:")[0]}')
             #删除本次请求
             del self.driver.requests
             #从头开始重新执行程序
@@ -255,16 +289,26 @@ class DataFetcher(object):
                 gf = gzip.GzipFile(fileobj=buf)
                 self.dedata = gf.read().decode('UTF-8')
             elif "JSON data" in file_type:
-                self.dedata = buf.read().decode('UTF-8')
-                print(self.dedata)
+                print(buf.read().decode('UTF-8'))
             else:
                 print(f'未知的压缩格式：{file_type}')
-                self.dedata = buf.read().decode('UTF-8')  # 直接输出
             
             self.dedata = json.loads(self.dedata)
         
         except Exception as e:
-            print(f'数据解码失败，错误类型：{type(e).__name__}, 错误详细：{e}')
+            print(f'数据解码失败，错误类型：{type(e).__name__}, 错误详细：{str(e).split("Stacktrace:")[0]}')
+
+            try:
+                # 检查是否有验证码元素，如果有，则需要人工处理
+                self.driver.find_element(By.CLASS_NAME, "alert-title")
+                print('验证码被触发，等待2小时后或人工处理再进行重试。')
+                self.driver.quit()
+                time.sleep(7200)
+                self.driver=init_driver()
+                self.get_page(1)
+            except:
+                print('')
+            
             self.get_page()
             
     def check_data(self):
@@ -282,7 +326,7 @@ class DataFetcher(object):
                 self.proc_priceList()
                 self.mergedata()
         except Exception as e:
-            print(f'数据检查出错：不存在航班，错误类型：{type(e).__name__}, 错误详细：{e}')
+            print(f'数据检查出错：不存在航班，错误类型：{type(e).__name__}, 错误详细：{str(e).split("Stacktrace:")[0]}')
             return 0        
     
     def proc_flightSegments(self):
@@ -332,7 +376,10 @@ class DataFetcher(object):
                 adultPrice=price['adultPrice']
                 cabin=price['cabin']
                 priceUnitList=dict(price['priceUnitList'][0]['flightSeatList'][0])
-                discountRate=priceUnitList['discountRate']
+                try:
+                    discountRate=priceUnitList['discountRate']
+                except:
+                    discountRate=1
                 #经济舱
                 if cabin=='Y':
                     economy.append(adultPrice)
@@ -418,17 +465,18 @@ class DataFetcher(object):
                 if del_info:
                     self.df = self.df[order]
             
+            files_dir = os.path.join(os.getcwd(), self.date, dt.now().strftime('%Y-%m-%d'))
             
-            if not os.path.exists(self.date):
-                os.makedirs(self.date)      
-
-            filename = os.path.join(os.getcwd(), self.date, f"{self.date}-{self.city[0]}-{self.city[1]}.csv")
+            if not os.path.exists(files_dir):
+                os.makedirs(files_dir)
+            
+            filename = os.path.join(files_dir, f"{self.city[0]}-{self.city[1]}.csv")
 
             self.df.to_csv(filename,encoding='GB18030',index=False)
             
             print('\n数据爬取完成',filename) 
         except Exception as e:
-            print('合并数据失败',e)
+            print('合并数据失败',str(e).split("Stacktrace:")[0])
 
 
 
@@ -438,26 +486,34 @@ if __name__ == '__main__':
     
     citys=gen_citys(crawal_citys)
 
-    flight_date=dt.now()+timedelta(days=1)
-    flight_date=flight_date.strftime('%Y-%m-%d')
+    flight_dates=generate_flight_dates(crawal_days,days_interval)
 
-    Flight_DataFetcher=DataFetcher(driver,flight_date)
+    Flight_DataFetcher=DataFetcher(driver)
 
-    for city in citys:
-        if citys.index(city)==0:
+    for flight_date in flight_dates:
+        
+        Flight_DataFetcher.date=flight_date
+
+        if flight_dates.index(flight_date)==0:
             #第一次运行
             Flight_DataFetcher.get_page(1)
-        
-        #后续运行只需更换出发与目的地
-        Flight_DataFetcher.city=city
-        Flight_DataFetcher.change_city()
 
-        if Flight_DataFetcher.dedata:
-            Flight_DataFetcher.check_data()
+        for city in citys:
             
-        time.sleep(crawal_interval)
+            #后续运行只需更换出发与目的地
+            Flight_DataFetcher.city=city
+            Flight_DataFetcher.change_city()
+
+            if Flight_DataFetcher.dedata:
+                Flight_DataFetcher.check_data()
+                
+            time.sleep(crawal_interval)
         
     #运行结束退出
-    driver.quit()
+    try:
+        driver=Flight_DataFetcher.driver
+        driver.quit()
+    except Exception as e:
+        print(f"An error occurred while quitting the driver: {e}")
 
     print('\n程序运行完成！！！！')    
