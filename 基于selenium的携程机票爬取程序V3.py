@@ -98,10 +98,7 @@ class DataFetcher(object):
         self.date=None
         self.city=None
         self.err=0#错误重试次数
-        self.flights = pd.DataFrame()
-        self.prices = pd.DataFrame()
         
-
     def remove_btn(self):
         try:
             WebDriverWait(self.driver, max_wait_time).until(lambda d: d.execute_script('return typeof jQuery !== "undefined"'))
@@ -200,6 +197,9 @@ class DataFetcher(object):
                 for m in self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block'):
                     
                     if int(m.find_element(By.CLASS_NAME,'month').text[:-1]) != int(self.date[5:7]):
+                        if self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block').index(m)==1:
+                            ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(m.find_elements(By.CLASS_NAME,'date-d')[-1]))
+                            ele.click()
                         continue
                     
                     for d in m.find_elements(By.CLASS_NAME,'date-d'):
@@ -329,6 +329,7 @@ class DataFetcher(object):
             return 0        
     
     def proc_flightSegments(self):
+        self.flights = pd.DataFrame()
         for flightlist in self.flightItineraryList:
             flightlist=flightlist['flightSegments'][0]['flightList']
             flightUnitList=dict(flightlist[0])
@@ -362,6 +363,7 @@ class DataFetcher(object):
                           
             
     def proc_priceList(self):
+        self.prices = pd.DataFrame()
         for flightlist in self.flightItineraryList:
             flightNo=flightlist['itineraryId'].split('_')[0]
             priceList=flightlist['priceList']

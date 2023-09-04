@@ -68,13 +68,21 @@ def init_driver():
     options.add_argument('--headless')  # 启用无头模式
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
-    options.add_argument("--disable-blink-features")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument('--disable-extensions')
+    options.add_argument('--pageLoadStrategy=eager')
+    options.add_argument('--disable-gpu')
+    #options.add_argument('window-size=800x600')
+    options.add_argument('--disable-software-rasterizer')
+    options.add_argument('--disable-dev-shm-usage')
+    prefs = {"profile.managed_default_content_settings.images": 2}
+    options.add_experimental_option("prefs", prefs)
     options.add_experimental_option("excludeSwitches", ['enable-automation'])  # 不显示正在受自动化软件控制的提示
     #options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/116.0.1938.69")
     driver = webdriver.Chrome(options=options)
     driver.set_page_load_timeout(300)  # 设置加载超时阈值
     driver.maximize_window()
+    #driver.set_window_size(1920, 1080)
 
     return driver
 
@@ -120,10 +128,7 @@ class DataFetcher(object):
         self.date=None
         self.city=None
         self.err=0#错误重试次数
-        self.flights = pd.DataFrame()
-        self.prices = pd.DataFrame()
         
-
     def remove_btn(self):
         try:
             WebDriverWait(self.driver, max_wait_time).until(lambda d: d.execute_script('return typeof jQuery !== "undefined"'))
@@ -229,6 +234,9 @@ class DataFetcher(object):
                 for m in self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block'):
                     
                     if int(m.find_element(By.CLASS_NAME,'month').text[:-1]) != int(self.date[5:7]):
+                        if self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block').index(m)==1:
+                            ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(m.find_elements(By.CLASS_NAME,'date-d')[-1]))
+                            ele.click()
                         continue
                     
                     for d in m.find_elements(By.CLASS_NAME,'date-d'):
@@ -357,6 +365,7 @@ class DataFetcher(object):
             return 0        
     
     def proc_flightSegments(self):
+        self.flights = pd.DataFrame()
         for flightlist in self.flightItineraryList:
             flightlist=flightlist['flightSegments'][0]['flightList']
             flightUnitList=dict(flightlist[0])
@@ -390,6 +399,7 @@ class DataFetcher(object):
                           
             
     def proc_priceList(self):
+        self.prices = pd.DataFrame()
         for flightlist in self.flightItineraryList:
             flightNo=flightlist['itineraryId'].split('_')[0]
             priceList=flightlist['priceList']
