@@ -28,6 +28,9 @@ days_interval = 5
 # 设置页面加载的最长等待时间（单位：秒）
 max_wait_time = 10
 
+#最大错误重试次数
+max_retry_time = 5
+
 # 是否只抓取直飞信息（True: 只抓取直飞，False: 抓取所有航班）
 direct_flight = True
 
@@ -38,17 +41,18 @@ del_info = False
 rename_col = True
 
 def init_driver():
-    #chromeDriverPath = 'C:/Program Files/Google/Chrome/Application/chromedriver' #chromedriver位置
+    
     #options = webdriver.ChromeOptions() # 创建一个配置对象
     options = webdriver.EdgeOptions() # 创建一个配置对象
     options.add_argument('--incognito')  # 隐身模式（无痕模式）
-    #options.add_argument('--headless')  # 启用无头模式
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument("--disable-blink-features")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    #options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/116.0.1938.69")
     options.add_experimental_option("excludeSwitches", ['enable-automation'])# 不显示正在受自动化软件控制
+    #options.add_argument('--headless')  # 启用无头模式
+    #chromeDriverPath = 'C:/Program Files/Google/Chrome/Application/chromedriver' #chromedriver位置
+    #options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/116.0.1938.69")
     #driver = webdriver.Chrome(executable_path=self.chromeDriverPath,chrome_options=self.options)
     driver = webdriver.Edge(options=options)
     driver.set_page_load_timeout(300)#设置加载超时阈值
@@ -105,28 +109,33 @@ class DataFetcher(object):
             js_remove="$('.notice-box').remove();"
             self.driver.execute_script(js_remove)
         except Exception as e:
-            print('提醒移除失败',str(e).split("Stacktrace:")[0])
+            print(f'remove_btn:提醒移除失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}')
 
     def check_verification_code(self):
+        #移除注意事项
+        self.remove_btn()
+        
         try:
             # 检查是否有验证码元素，如果有，则需要人工处理
             self.driver.find_element(By.ID, "verification-code")
-            print('验证码被触发，等待2小时后或人工处理再进行重试。')
-            time.sleep(7200)
+            print('check_verification_code：验证码被触发，等待或人工处理再进行重试。')
+            time.sleep(crawal_interval*100)
             self.driver.quit()
             self.driver=init_driver()
+            self.err=0
             self.get_page(1)
         except:
             try:
                 self.driver.find_element(By.CLASS_NAME, "alert-title")
-                print('验证码被触发，等待2小时后或人工处理再进行重试。')
-                time.sleep(7200)
+                print('check_verification_code：验证码被触发，等待后或人工处理再进行重试。')
+                time.sleep(crawal_interval*100)
                 self.driver.quit()
                 self.driver=init_driver()
+                self.err=0
                 self.get_page(1)
             except:
                 # 如果没有找到验证码元素，则说明页面加载成功，没有触发验证码
-                print('页面成功加载，未触发验证码，即将进行下一步操作。')
+                print('')
 
 
     def get_page(self,reset_to_homepage=0): 
@@ -135,8 +144,8 @@ class DataFetcher(object):
                 #前往首页
                 self.driver.get('https://flights.ctrip.com/online/channel/domestic')
             
-            #移除提醒
-            self.remove_btn()
+            #检查注意事项和验证码
+            self.check_verification_code()
             
             WebDriverWait(self.driver, max_wait_time).until(EC.presence_of_element_located((By.CLASS_NAME, 'pc_home-jipiao')))
             #点击飞机图标，返回主界面
@@ -153,24 +162,18 @@ class DataFetcher(object):
             
         except Exception as e:
             # 用f字符串格式化错误类型和错误信息，提供更多的调试信息
-            print(f'页面加载或元素操作失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}')
-            #self.driver.close()
+            print(f'get_page：页面加载或元素操作失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}')
             # 重新尝试加载页面，这次指定需要重定向到首页
             self.get_page(1)
-        else:
-            # 检查是否有验证码元素，如果有，则需要人工处理
-            self.check_verification_code()
 
     def change_city(self):
-        
-        #移除提醒提醒
-        self.remove_btn()
-        
         try:
-            #获取出发地与目的地元素位置
-            #its=self.driver.find_elements(By.CLASS_NAME,'form-input-v3')
-            
+            #等待页面完成加载
             WebDriverWait(self.driver, max_wait_time).until(EC.presence_of_element_located((By.CLASS_NAME, 'form-input-v3')))
+            
+            #检查注意事项和验证码
+            self.check_verification_code()
+
             #若出发地与目标值不符，则更改出发地
             while self.city[0] not in self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[0].get_attribute('value'):    
                 ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[0]))
@@ -179,7 +182,9 @@ class DataFetcher(object):
                 ele.send_keys(Keys.CONTROL + 'a')
                 ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[0]))
                 ele.send_keys(self.city[0])
-                
+
+            print(f'change_city：更换城市【0】-{self.driver.find_elements(By.CLASS_NAME,"form-input-v3")[0].get_attribute("value")}')
+
             #若目的地与目标值不符，则更改目的地
             while self.city[1] not in self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1].get_attribute('value'):
                 ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1]))
@@ -188,6 +193,8 @@ class DataFetcher(object):
                 ele.send_keys(Keys.CONTROL + 'a')
                 ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1]))
                 ele.send_keys(self.city[1])
+
+            print(f'change_city：更换城市【1】-{self.driver.find_elements(By.CLASS_NAME,"form-input-v3")[1].get_attribute("value")}')
 
             while self.driver.find_elements(By.CSS_SELECTOR,"[aria-label=请选择日期]")[0].get_attribute("value") != self.date:
                 #点击日期选择
@@ -207,53 +214,48 @@ class DataFetcher(object):
                             ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(d))
                             ele.click()
                             break     
+            print(f'change_city：更换日期-{self.driver.find_elements(By.CSS_SELECTOR,"[aria-label=请选择日期]")[0].get_attribute("value")}')
+
+
+            while '(' not in self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1].get_attribute('value'):
+                #Enter搜索
+                #ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(its[1]))
+                #ele.send_keys(Keys.ENTER)
                 
-            # 验证目的地名称是否完整
-            try:
-                while '(' not in self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1].get_attribute('value'):
-                    #Enter搜索
-                    #ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(its[1]))
-                    #ele.send_keys(Keys.ENTER)
-                    
-                    #移除提醒
-                    self.remove_btn()
-                    
-                    #通过低价提醒按钮实现enter键换页
-                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'low-price-remind')[0]))
-                    ele.click()
-            except IndexError as e:
-                print(f'更换城市失败，错误类型：{type(e).__name__}, 错误信息：{str(e).split("Stacktrace:")[0]}')
-                #以防万一
-                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1]))
-                ele.send_keys(Keys.ENTER)
+                #通过低价提醒按钮实现enter键换页
+                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'low-price-remind')[0]))
+                ele.click()
             
-            print(f'成功更换城市，当前路线为：{self.city[0]}-{self.city[1]}')
-        #捕获错误
-        except (IndexError,ElementNotInteractableException,StaleElementReferenceException,ElementClickInterceptedException,ElementClickInterceptedException) as e:
-            
-            # 检查是否有验证码元素，如果有，则需要人工处理
-            self.check_verification_code()
-        
-            print(f'更换城市失败，错误类型：{type(e).__name__}, 错误信息：{str(e).split("Stacktrace:")[0]}')
-            self.err+=1
-            if self.err<=5:
-                self.change_city()
-            else:
-                self.err=0
-                del self.driver.requests
-                self.get_page()
-                self.change_city()
         except Exception as e:
-            print(f'更换城市失败，错误类型：{type(e).__name__}, 错误信息：{str(e).split("Stacktrace:")[0]}')
-            #删除本次请求
-            del self.driver.requests
-            #从头开始重新执行程序
-            self.get_page()
+            #错误次数+1
+            self.err+=1
+
+            print(f'错误次数【{self.err}-{max_retry_time}】,change_city：更换城市和日期失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}')
+            
+            #检查注意事项和验证码
+            self.check_verification_code()
+            
+            #重试
+            print('change_city：重试')
             self.change_city()
         else:
-            #若无错误，执行下一步
+            #重置错误计数
             self.err=0
-            self.get_data()                 
+            
+            #若无错误，执行下一步
+            self.get_data()
+            
+            print(f'change_city：成功更换城市和日期，当前路线为：{self.city[0]}-{self.city[1]}') 
+        finally:
+            #判断错误次数
+            if self.err>=max_retry_time:
+
+                print(f'错误次数【{self.err}-{max_retry_time}】,change_city:重新尝试加载页面，这次指定需要重定向到首页')
+
+                #重置错误计数
+                self.err=0
+                # 重新尝试加载页面，这次指定需要重定向到首页
+                self.get_page(1)               
     
     def get_data(self):
         try:
@@ -262,26 +264,54 @@ class DataFetcher(object):
         
             rb=dict(json.loads(self.predata.body).get('flightSegments')[0])
         
-        except TimeoutException as e:
-            print(f'获取数据超时，错误类型：{type(e).__name__}, 错误详细：{str(e).split("Stacktrace:")[0]}')
+        except Exception as e:
+            #错误次数+1
+            self.err+=1
+
+            print(f'错误次数【{self.err}-{max_retry_time}】,get_data:获取数据超时，错误类型：{type(e).__name__}, 错误详细：{str(e).split("Stacktrace:")[0]}')
+            
             #删除本次请求
             del self.driver.requests
-            #从头开始重新执行程序
-            self.get_page()
-            self.change_city()
+            
+            # 刷新页面
+            print('get_data：刷新页面')
+            self.driver.refresh()
+
+            #检查注意事项和验证码
+            self.check_verification_code()
+
+            #重试
+            self.get_data()
         else:
+            #重置错误计数
+            self.err=0
+
             #检查数据获取正确性
             if rb['departureCityName'] == self.city[0] and rb['arrivalCityName'] == self.city[1]:
-                print(f'城市匹配成功：出发地-{self.city[0]}，目的地-{self.city[1]}')
+                print(f'get_data:城市匹配成功：出发地-{self.city[0]}，目的地-{self.city[1]}')
+                
                 #删除本次请求
                 del self.driver.requests
+                
                 #若无错误，执行下一步
                 self.decode_data()
             else:
                 #删除本次请求
                 del self.driver.requests
+                
                 #重新更换城市
+                print('get_data：重新更换城市')
                 self.change_city()
+        finally:
+            #判断错误次数
+            if self.err>=max_retry_time:
+
+                print(f'错误次数【{self.err}-{max_retry_time}】,get_data:重新尝试加载页面，这次指定需要重定向到首页')
+
+                #重置错误计数
+                self.err=0
+                # 重新尝试加载页面，这次指定需要重定向到首页
+                self.get_page(1)    
     
     def decode_data(self):
         try:
@@ -302,13 +332,36 @@ class DataFetcher(object):
             self.dedata = json.loads(self.dedata)
         
         except Exception as e:
-            print(f'数据解码失败，错误类型：{type(e).__name__}, 错误详细：{str(e).split("Stacktrace:")[0]}')
+            #错误次数+1
+            self.err+=1
+            
+            print(f'错误次数【{self.err}-{max_retry_time}】,decode_data:数据解码失败，错误类型：{type(e).__name__}, 错误详细：{str(e).split("Stacktrace:")[0]}')
 
-            # 检查是否有验证码元素，如果有，则需要人工处理
+            # 刷新页面
+            print('decode_data：刷新页面')
+            self.driver.refresh()
+            
+            #检查注意事项和验证码
             self.check_verification_code()
             
-            self.get_page()
-            self.change_city()
+            #重试
+            self.get_data()
+        else:
+            #重置错误计数
+            self.err=0
+
+            #若无错误，执行下一步
+            self.check_data()
+        finally:
+            #判断错误次数
+            if self.err>=max_retry_time:
+                print(f'错误次数【{self.err}-{max_retry_time}】,decode_data:重新尝试加载页面，这次指定需要重定向到首页')
+                
+                #重置错误计数
+                self.err=0
+
+                # 重新尝试加载页面，这次指定需要重定向到首页
+                self.get_page(1) 
             
     def check_data(self):
         try:
@@ -320,16 +373,18 @@ class DataFetcher(object):
             if len(self.flightItineraryList)==0 and direct_flight:
                 print(f'不存在直航航班:{self.city[0]}-{self.city[1]}')
                 return 0
-            else:
-                self.proc_flightSegments()
-                self.proc_priceList()
-                self.mergedata()
         except Exception as e:
             print(f'数据检查出错：不存在航班，错误类型：{type(e).__name__}, 错误详细：{str(e).split("Stacktrace:")[0]}')
-            return 0        
+            return 0
+        else:
+            self.proc_flightSegments()
+            self.proc_priceList()
+            self.mergedata()
     
     def proc_flightSegments(self):
+        
         self.flights = pd.DataFrame()
+        
         for flightlist in self.flightItineraryList:
             flightlist=flightlist['flightSegments'][0]['flightList']
             flightUnitList=dict(flightlist[0])
@@ -363,7 +418,9 @@ class DataFetcher(object):
                           
             
     def proc_priceList(self):
+        
         self.prices = pd.DataFrame()
+        
         for flightlist in self.flightItineraryList:
             flightNo=flightlist['itineraryId'].split('_')[0]
             priceList=flightlist['priceList']
@@ -475,7 +532,7 @@ class DataFetcher(object):
 
             self.df.to_csv(filename,encoding='GB18030',index=False)
             
-            print('\n数据爬取完成',filename) 
+            print('\n数据爬取完成',filename,'\n') 
         except Exception as e:
             print('合并数据失败',str(e).split("Stacktrace:")[0])
 
@@ -505,9 +562,6 @@ if __name__ == '__main__':
             Flight_DataFetcher.city=city
             Flight_DataFetcher.change_city()
 
-            if Flight_DataFetcher.dedata:
-                Flight_DataFetcher.check_data()
-                
             time.sleep(crawal_interval)
         
     #运行结束退出
