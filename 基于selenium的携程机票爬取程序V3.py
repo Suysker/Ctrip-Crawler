@@ -10,7 +10,6 @@ from datetime import datetime as dt,timedelta
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException,StaleElementReferenceException,ElementNotInteractableException,ElementClickInterceptedException # 加载异常
 from selenium.webdriver.support.ui import WebDriverWait
 
 #爬取的城市
@@ -39,6 +38,9 @@ del_info = False
 
 # 是否重命名DataFrame的列名
 rename_col = True
+
+#调试截图
+enable_screenshot = False
 
 def init_driver():
     
@@ -118,7 +120,7 @@ class DataFetcher(object):
         try:
             # 检查是否有验证码元素，如果有，则需要人工处理
             self.driver.find_element(By.ID, "verification-code")
-            print('check_verification_code：验证码被触发，等待或人工处理再进行重试。')
+            print('check_verification_code：验证码被触发verification-code，等待或人工处理再进行重试。')
             time.sleep(crawal_interval*100)
             self.driver.quit()
             self.driver=init_driver()
@@ -127,7 +129,7 @@ class DataFetcher(object):
         except:
             try:
                 self.driver.find_element(By.CLASS_NAME, "alert-title")
-                print('check_verification_code：验证码被触发，等待后或人工处理再进行重试。')
+                print('check_verification_code：验证码被触发alert-title，等待后或人工处理再进行重试。')
                 time.sleep(crawal_interval*100)
                 self.driver.quit()
                 self.driver=init_driver()
@@ -163,8 +165,16 @@ class DataFetcher(object):
         except Exception as e:
             # 用f字符串格式化错误类型和错误信息，提供更多的调试信息
             print(f'get_page：页面加载或元素操作失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}')
+            
+            #保存错误截图
+            if enable_screenshot:
+                self.driver.save_screenshot(f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png')
+            
             # 重新尝试加载页面，这次指定需要重定向到首页
             self.get_page(1)
+        else:
+            #继续下一步
+            self.change_city()
 
     def change_city(self):
         try:
@@ -203,17 +213,29 @@ class DataFetcher(object):
                 
                 for m in self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block'):
                     
+                    if int(m.find_element(By.CLASS_NAME,'year').text[:-1]) != int(self.date[:4]):
+                        continue
+
                     if int(m.find_element(By.CLASS_NAME,'month').text[:-1]) != int(self.date[5:7]):
-                        if self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block').index(m)==1:
-                            ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(m.find_elements(By.CLASS_NAME,'date-d')[-1]))
-                            ele.click()
                         continue
                     
                     for d in m.find_elements(By.CLASS_NAME,'date-d'):
                         if int(d.text) == int(self.date[-2:]):
                             ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(d))
                             ele.click()
-                            break     
+                            break   
+                if int(self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block')[0].find_element(By.CLASS_NAME,'year').text[:-1])<int(self.date[:4]):
+                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'in-date-picker.icon.next-ico.iconf-right')[1]))
+                    ele.click()
+                if int(self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block')[0].find_element(By.CLASS_NAME,'year').text[:-1])>int(self.date[:4]):
+                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'in-date-picker.icon.prev-ico.iconf-left')[0]))
+                    ele.click()
+                if int(self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block')[0].find_element(By.CLASS_NAME,'month').text[:-1])>int(self.date[5:7]):
+                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'in-date-picker.icon.prev-ico.iconf-left')[0]))
+                    ele.click()
+                if int(self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block')[1].find_element(By.CLASS_NAME,'month').text[:-1])<int(self.date[5:7]):
+                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'in-date-picker.icon.next-ico.iconf-right')[1]))
+                    ele.click()
             print(f'change_city：更换日期-{self.driver.find_elements(By.CSS_SELECTOR,"[aria-label=请选择日期]")[0].get_attribute("value")}')
 
 
@@ -229,38 +251,44 @@ class DataFetcher(object):
         except Exception as e:
             #错误次数+1
             self.err+=1
+            
+            #保存错误截图
+            if enable_screenshot:
+                self.driver.save_screenshot(f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png')
 
-            print(f'错误次数【{self.err}-{max_retry_time}】,change_city：更换城市和日期失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}')
+            print(f'错误次数【{self.err}-{max_retry_time}】,change_city：更换城市和日期失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}')    
             
             #检查注意事项和验证码
             self.check_verification_code()
             
-            #重试
-            print('change_city：重试')
-            self.change_city()
-        else:
-            #重置错误计数
-            self.err=0
-            
-            #若无错误，执行下一步
-            self.get_data()
-            
-            print(f'change_city：成功更换城市和日期，当前路线为：{self.city[0]}-{self.city[1]}') 
-        finally:
+            if self.err<max_retry_time:
+                
+                #重试
+                print('change_city：重试')
+                self.change_city()
             #判断错误次数
             if self.err>=max_retry_time:
 
                 print(f'错误次数【{self.err}-{max_retry_time}】,change_city:重新尝试加载页面，这次指定需要重定向到首页')
+                
+                #删除本次请求
+                del self.driver.requests  
 
                 #重置错误计数
                 self.err=0
+                
                 # 重新尝试加载页面，这次指定需要重定向到首页
-                self.get_page(1)               
+                self.get_page(1)
+        else:      
+            #若无错误，执行下一步
+            self.get_data()
+            
+            print(f'change_city：成功更换城市和日期，当前路线为：{self.city[0]}-{self.city[1]}')             
     
     def get_data(self):
         try:
             #等待响应加载完成
-            self.predata = self.driver.wait_for_request('/international/search/api/search/batchSearch?.*', timeout=30)
+            self.predata = self.driver.wait_for_request('/international/search/api/search/batchSearch?.*', timeout=max_wait_time)
         
             rb=dict(json.loads(self.predata.body).get('flightSegments')[0])
         
@@ -270,39 +298,24 @@ class DataFetcher(object):
 
             print(f'错误次数【{self.err}-{max_retry_time}】,get_data:获取数据超时，错误类型：{type(e).__name__}, 错误详细：{str(e).split("Stacktrace:")[0]}')
             
+            #保存错误截图
+            if enable_screenshot:
+                self.driver.save_screenshot(f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png')
+            
             #删除本次请求
             del self.driver.requests
             
-            # 刷新页面
-            print('get_data：刷新页面')
-            self.driver.refresh()
+            if self.err<max_retry_time:
+                # 刷新页面
+                print('get_data：刷新页面')
+                self.driver.refresh()
 
-            #检查注意事项和验证码
-            self.check_verification_code()
+                #检查注意事项和验证码
+                self.check_verification_code()
 
-            #重试
-            self.get_data()
-        else:
-            #重置错误计数
-            self.err=0
-
-            #检查数据获取正确性
-            if rb['departureCityName'] == self.city[0] and rb['arrivalCityName'] == self.city[1]:
-                print(f'get_data:城市匹配成功：出发地-{self.city[0]}，目的地-{self.city[1]}')
-                
-                #删除本次请求
-                del self.driver.requests
-                
-                #若无错误，执行下一步
-                self.decode_data()
-            else:
-                #删除本次请求
-                del self.driver.requests
-                
-                #重新更换城市
-                print('get_data：重新更换城市')
-                self.change_city()
-        finally:
+                #重试
+                self.get_data()
+            
             #判断错误次数
             if self.err>=max_retry_time:
 
@@ -311,7 +324,38 @@ class DataFetcher(object):
                 #重置错误计数
                 self.err=0
                 # 重新尝试加载页面，这次指定需要重定向到首页
-                self.get_page(1)    
+                self.get_page(1)
+                
+        else:
+            #删除本次请求
+            del self.driver.requests
+
+            #检查数据获取正确性
+            if rb['departureCityName'] == self.city[0] and rb['arrivalCityName'] == self.city[1]:
+                print(f'get_data:城市匹配成功：出发地-{self.city[0]}，目的地-{self.city[1]}')
+                            
+                #重置错误计数
+                self.err=0
+                
+                #若无错误，执行下一步
+                self.decode_data()
+            else:
+                print(f'错误次数【{self.err}-{max_retry_time}】,get_data:刷新页面')
+                #错误次数+1
+                self.err+=1
+            
+                #保存错误截图
+                if enable_screenshot:
+                    self.driver.save_screenshot(f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png')
+
+                #重新更换城市
+                print(f'get_data：重新更换城市:{rb["departureCityName"]}-{rb["arrivalCityName"]}')
+                
+                #检查注意事项和验证码
+                self.check_verification_code()
+                
+                #重试
+                self.change_city()
     
     def decode_data(self):
         try:
@@ -337,22 +381,23 @@ class DataFetcher(object):
             
             print(f'错误次数【{self.err}-{max_retry_time}】,decode_data:数据解码失败，错误类型：{type(e).__name__}, 错误详细：{str(e).split("Stacktrace:")[0]}')
 
-            # 刷新页面
-            print('decode_data：刷新页面')
-            self.driver.refresh()
+            #保存错误截图
+            if enable_screenshot:
+                self.driver.save_screenshot(f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png')
             
-            #检查注意事项和验证码
-            self.check_verification_code()
+            #删除本次请求
+            del self.driver.requests
             
-            #重试
-            self.get_data()
-        else:
-            #重置错误计数
-            self.err=0
-
-            #若无错误，执行下一步
-            self.check_data()
-        finally:
+            if self.err<max_retry_time:
+                # 刷新页面
+                print('decode_data：刷新页面')
+                self.driver.refresh()
+            
+                #检查注意事项和验证码
+                self.check_verification_code()
+            
+                #重试
+                self.get_data()
             #判断错误次数
             if self.err>=max_retry_time:
                 print(f'错误次数【{self.err}-{max_retry_time}】,decode_data:重新尝试加载页面，这次指定需要重定向到首页')
@@ -362,6 +407,12 @@ class DataFetcher(object):
 
                 # 重新尝试加载页面，这次指定需要重定向到首页
                 self.get_page(1) 
+        else:
+            #重置错误计数
+            self.err=0
+
+            #若无错误，执行下一步
+            self.check_data()
             
     def check_data(self):
         try:
@@ -552,16 +603,17 @@ if __name__ == '__main__':
         
         Flight_DataFetcher.date=flight_date
 
-        if flight_dates.index(flight_date)==0:
-            #第一次运行
-            Flight_DataFetcher.get_page(1)
-
         for city in citys:
             
-            #后续运行只需更换出发与目的地
             Flight_DataFetcher.city=city
-            Flight_DataFetcher.change_city()
-
+            
+            if (flight_dates.index(flight_date)==0) and (citys.index(city)==0):
+                #初始化页面
+                Flight_DataFetcher.get_page(1)
+            else:
+                #后续运行只需更换出发与目的地
+                Flight_DataFetcher.change_city()
+            
             time.sleep(crawal_interval)
         
     #运行结束退出
