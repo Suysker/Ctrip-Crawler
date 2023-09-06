@@ -126,6 +126,7 @@ class DataFetcher(object):
             self.driver=init_driver()
             self.err=0
             self.get_page(1)
+            return False
         except:
             try:
                 self.driver.find_element(By.CLASS_NAME, "alert-title")
@@ -135,9 +136,11 @@ class DataFetcher(object):
                 self.driver=init_driver()
                 self.err=0
                 self.get_page(1)
+                return False
             except:
                 # 如果没有找到验证码元素，则说明页面加载成功，没有触发验证码
                 print('')
+                return True
 
 
     def get_page(self,reset_to_homepage=0): 
@@ -147,20 +150,20 @@ class DataFetcher(object):
                 self.driver.get('https://flights.ctrip.com/online/channel/domestic')
             
             #检查注意事项和验证码
-            self.check_verification_code()
+            if self.check_verification_code():
             
-            WebDriverWait(self.driver, max_wait_time).until(EC.presence_of_element_located((By.CLASS_NAME, 'pc_home-jipiao')))
-            #点击飞机图标，返回主界面
-            ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CLASS_NAME,'pc_home-jipiao')))
-            ele.click()
-            
-            #单程
-            ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'radio-label')[0]))
-            ele.click()
-                           
-            #搜索
-            ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CLASS_NAME,'search-btn')))
-            ele.click()
+                WebDriverWait(self.driver, max_wait_time).until(EC.presence_of_element_located((By.CLASS_NAME, 'pc_home-jipiao')))
+                #点击飞机图标，返回主界面
+                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CLASS_NAME,'pc_home-jipiao')))
+                ele.click()
+                
+                #单程
+                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'radio-label')[0]))
+                ele.click()
+                            
+                #搜索
+                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CLASS_NAME,'search-btn')))
+                ele.click()
             
         except Exception as e:
             # 用f字符串格式化错误类型和错误信息，提供更多的调试信息
@@ -182,71 +185,72 @@ class DataFetcher(object):
             WebDriverWait(self.driver, max_wait_time).until(EC.presence_of_element_located((By.CLASS_NAME, 'form-input-v3')))
             
             #检查注意事项和验证码
-            self.check_verification_code()
+            if self.check_verification_code():
 
-            #若出发地与目标值不符，则更改出发地
-            while self.city[0] not in self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[0].get_attribute('value'):    
-                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[0]))
-                ele.click()
-                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[0]))
-                ele.send_keys(Keys.CONTROL + 'a')
-                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[0]))
-                ele.send_keys(self.city[0])
+                #若出发地与目标值不符，则更改出发地
+                while self.city[0] not in self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[0].get_attribute('value'):    
+                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[0]))
+                    ele.click()
+                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[0]))
+                    ele.send_keys(Keys.CONTROL + 'a')
+                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[0]))
+                    ele.send_keys(self.city[0])
 
-            print(f'change_city：更换城市【0】-{self.driver.find_elements(By.CLASS_NAME,"form-input-v3")[0].get_attribute("value")}')
+                print(f'change_city：更换城市【0】-{self.driver.find_elements(By.CLASS_NAME,"form-input-v3")[0].get_attribute("value")}')
 
-            #若目的地与目标值不符，则更改目的地
-            while self.city[1] not in self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1].get_attribute('value'):
-                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1]))
-                ele.click()
-                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1]))
-                ele.send_keys(Keys.CONTROL + 'a')
-                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1]))
-                ele.send_keys(self.city[1])
+                #若目的地与目标值不符，则更改目的地
+                while self.city[1] not in self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1].get_attribute('value'):
+                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1]))
+                    ele.click()
+                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1]))
+                    ele.send_keys(Keys.CONTROL + 'a')
+                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1]))
+                    ele.send_keys(self.city[1])
 
-            print(f'change_city：更换城市【1】-{self.driver.find_elements(By.CLASS_NAME,"form-input-v3")[1].get_attribute("value")}')
+                print(f'change_city：更换城市【1】-{self.driver.find_elements(By.CLASS_NAME,"form-input-v3")[1].get_attribute("value")}')
 
-            while self.driver.find_elements(By.CSS_SELECTOR,"[aria-label=请选择日期]")[0].get_attribute("value") != self.date:
-                #点击日期选择
-                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CLASS_NAME,'modifyDate.depart-date')))
-                ele.click()
-                
-                for m in self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block'):
+                while self.driver.find_elements(By.CSS_SELECTOR,"[aria-label=请选择日期]")[0].get_attribute("value") != self.date:
+                    #点击日期选择
+                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CLASS_NAME,'modifyDate.depart-date')))
+                    ele.click()
+
+                    if int(self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block')[0].find_element(By.CLASS_NAME,'year').text[:-1])<int(self.date[:4]):
+                        ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'in-date-picker.icon.next-ico.iconf-right')[1]))
+                        ele.click()
+                    if int(self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block')[0].find_element(By.CLASS_NAME,'year').text[:-1])>int(self.date[:4]):
+                        ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'in-date-picker.icon.prev-ico.iconf-left')[0]))
+                        ele.click()
+                    if int(self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block')[0].find_element(By.CLASS_NAME,'month').text[:-1])>int(self.date[5:7]):
+                        ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'in-date-picker.icon.prev-ico.iconf-left')[0]))
+                        ele.click()
+                    if int(self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block')[1].find_element(By.CLASS_NAME,'month').text[:-1])<int(self.date[5:7]):
+                        ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'in-date-picker.icon.next-ico.iconf-right')[1]))
+                        ele.click()
                     
-                    if int(m.find_element(By.CLASS_NAME,'year').text[:-1]) != int(self.date[:4]):
-                        continue
+                    for m in self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block'):
+                        
+                        if int(m.find_element(By.CLASS_NAME,'year').text[:-1]) != int(self.date[:4]):
+                            continue
 
-                    if int(m.find_element(By.CLASS_NAME,'month').text[:-1]) != int(self.date[5:7]):
-                        continue
+                        if int(m.find_element(By.CLASS_NAME,'month').text[:-1]) != int(self.date[5:7]):
+                            continue
+                        
+                        for d in m.find_elements(By.CLASS_NAME,'date-d'):
+                            if int(d.text) == int(self.date[-2:]):
+                                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(d))
+                                ele.click()
+                                break   
+                print(f'change_city：更换日期-{self.driver.find_elements(By.CSS_SELECTOR,"[aria-label=请选择日期]")[0].get_attribute("value")}')
+
+
+                while '(' not in self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1].get_attribute('value'):
+                    #Enter搜索
+                    #ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(its[1]))
+                    #ele.send_keys(Keys.ENTER)
                     
-                    for d in m.find_elements(By.CLASS_NAME,'date-d'):
-                        if int(d.text) == int(self.date[-2:]):
-                            ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(d))
-                            ele.click()
-                            break   
-                if int(self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block')[0].find_element(By.CLASS_NAME,'year').text[:-1])<int(self.date[:4]):
-                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'in-date-picker.icon.next-ico.iconf-right')[1]))
+                    #通过低价提醒按钮实现enter键换页
+                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'low-price-remind')[0]))
                     ele.click()
-                if int(self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block')[0].find_element(By.CLASS_NAME,'year').text[:-1])>int(self.date[:4]):
-                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'in-date-picker.icon.prev-ico.iconf-left')[0]))
-                    ele.click()
-                if int(self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block')[0].find_element(By.CLASS_NAME,'month').text[:-1])>int(self.date[5:7]):
-                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'in-date-picker.icon.prev-ico.iconf-left')[0]))
-                    ele.click()
-                if int(self.driver.find_elements(By.CLASS_NAME,'date-picker.date-picker-block')[1].find_element(By.CLASS_NAME,'month').text[:-1])<int(self.date[5:7]):
-                    ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'in-date-picker.icon.next-ico.iconf-right')[1]))
-                    ele.click()
-            print(f'change_city：更换日期-{self.driver.find_elements(By.CSS_SELECTOR,"[aria-label=请选择日期]")[0].get_attribute("value")}')
-
-
-            while '(' not in self.driver.find_elements(By.CLASS_NAME,'form-input-v3')[1].get_attribute('value'):
-                #Enter搜索
-                #ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(its[1]))
-                #ele.send_keys(Keys.ENTER)
-                
-                #通过低价提醒按钮实现enter键换页
-                ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME,'low-price-remind')[0]))
-                ele.click()
             
         except Exception as e:
             #错误次数+1
@@ -259,26 +263,26 @@ class DataFetcher(object):
             print(f'错误次数【{self.err}-{max_retry_time}】,change_city：更换城市和日期失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}')    
             
             #检查注意事项和验证码
-            self.check_verification_code()
+            if self.check_verification_code():
             
-            if self.err<max_retry_time:
-                
-                #重试
-                print('change_city：重试')
-                self.change_city()
-            #判断错误次数
-            if self.err>=max_retry_time:
+                if self.err<max_retry_time:
+                    
+                    #重试
+                    print('change_city：重试')
+                    self.change_city()
+                #判断错误次数
+                if self.err>=max_retry_time:
 
-                print(f'错误次数【{self.err}-{max_retry_time}】,change_city:重新尝试加载页面，这次指定需要重定向到首页')
-                
-                #删除本次请求
-                del self.driver.requests  
+                    print(f'错误次数【{self.err}-{max_retry_time}】,change_city:重新尝试加载页面，这次指定需要重定向到首页')
+                    
+                    #删除本次请求
+                    del self.driver.requests  
 
-                #重置错误计数
-                self.err=0
-                
-                # 重新尝试加载页面，这次指定需要重定向到首页
-                self.get_page(1)
+                    #重置错误计数
+                    self.err=0
+                    
+                    # 重新尝试加载页面，这次指定需要重定向到首页
+                    self.get_page(1)
         else:      
             #若无错误，执行下一步
             self.get_data()
@@ -311,10 +315,10 @@ class DataFetcher(object):
                 self.driver.refresh()
 
                 #检查注意事项和验证码
-                self.check_verification_code()
+                if self.check_verification_code():
 
-                #重试
-                self.get_data()
+                    #重试
+                    self.get_data()
             
             #判断错误次数
             if self.err>=max_retry_time:
@@ -352,10 +356,10 @@ class DataFetcher(object):
                 print(f'get_data：重新更换城市:{rb["departureCityName"]}-{rb["arrivalCityName"]}')
                 
                 #检查注意事项和验证码
-                self.check_verification_code()
+                if self.check_verification_code():
                 
-                #重试
-                self.change_city()
+                    #重试
+                    self.change_city()
     
     def decode_data(self):
         try:
@@ -394,10 +398,10 @@ class DataFetcher(object):
                 self.driver.refresh()
             
                 #检查注意事项和验证码
-                self.check_verification_code()
+                if self.check_verification_code():
             
-                #重试
-                self.get_data()
+                    #重试
+                    self.get_data()
             #判断错误次数
             if self.err>=max_retry_time:
                 print(f'错误次数【{self.err}-{max_retry_time}】,decode_data:重新尝试加载页面，这次指定需要重定向到首页')
