@@ -1,4 +1,3 @@
-import gen_proxy_servers
 import magic
 import io
 import os
@@ -13,18 +12,17 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-
 # 爬取的城市
-crawal_citys = ["上海", "香港", "东京"]
+crawal_citys = ["上海", "广州", "深圳", "北京"]
 
 # 爬取的日期
 crawal_days = 60
 
 # 设置各城市爬取的时间间隔（单位：秒）
-crawal_interval = 1
+crawal_interval = 5
 
 # 日期间隔
-days_interval = 1
+days_interval = 5
 
 # 设置页面加载的最长等待时间（单位：秒）
 max_wait_time = 10
@@ -41,60 +39,28 @@ del_info = False
 # 是否重命名DataFrame的列名
 rename_col = True
 
-# 开启代理
-enable_proxy = True
-
-# 生成代理IPV6数量
-ipv6_count = 120
-
-# 起始端口
-start_port = 20000
-
-# 服务端口
-proxy_port = 10000
-
-# 服务器地址
-proxy_address = "127.0.0.1"
-
-# 生成的IPV6接口名称
-base_interface = "eth0"
-
 # 调试截图
 enable_screenshot = False
 
 
-def kill_driver():
-    os.system(
-        """ps -ef | grep selenium | grep -v grep | awk '{print "kill -9" $2}'| sh"""
-    )
-
-
 def init_driver():
-    options = webdriver.ChromeOptions()  # 创建一个配置对象
-    if enable_proxy:
-        options.add_argument(
-            f"--proxy-server=http://{proxy_address}:{proxy_port}"
-        )  # 指定代理服务器和端口
+    # options = webdriver.ChromeOptions() # 创建一个配置对象
+    options = webdriver.EdgeOptions()  # 创建一个配置对象
     options.add_argument("--incognito")  # 隐身模式（无痕模式）
-    options.add_argument("--headless")  # 启用无头模式
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-blink-features")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--pageLoadStrategy=eager")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-software-rasterizer")
-    options.add_argument("--disable-dev-shm-usage")
-    prefs = {"profile.managed_default_content_settings.images": 2}
-    options.add_experimental_option("prefs", prefs)
     options.add_experimental_option(
         "excludeSwitches", ["enable-automation"]
-    )  # 不显示正在受自动化软件控制的提示
+    )  # 不显示正在受自动化软件控制
+    # options.add_argument('--headless')  # 启用无头模式
+    # chromeDriverPath = 'C:/Program Files/Google/Chrome/Application/chromedriver' #chromedriver位置
     # options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/116.0.1938.69")
-    driver = webdriver.Chrome(options=options)
+    # driver = webdriver.Chrome(executable_path=self.chromeDriverPath,chrome_options=self.options)
+    driver = webdriver.Edge(options=options)
     driver.set_page_load_timeout(300)  # 设置加载超时阈值
-    # driver.maximize_window()
-    driver.set_window_size(1280, 480)
+    driver.maximize_window()
 
     return driver
 
@@ -124,6 +90,8 @@ def generate_flight_dates(n, days_interval):
 
 
 # element_to_be_clickable 函数来替代 expected_conditions.element_to_be_clickable 或 expected_conditions.visibility_of_element_located
+
+
 def element_to_be_clickable(element):
     def check_clickable(driver):
         try:
@@ -149,14 +117,7 @@ class DataFetcher(object):
             WebDriverWait(self.driver, max_wait_time).until(
                 lambda d: d.execute_script('return typeof jQuery !== "undefined"')
             )
-            # 移除提醒
             js_remove = "$('.notice-box').remove();"
-            self.driver.execute_script(js_remove)
-            # 移除在线客服
-            js_remove = "$('.shortcut').remove();"
-            self.driver.execute_script(js_remove)
-            # 移除分享链接
-            js_remove = "$('.share-link').remove();"
             self.driver.execute_script(js_remove)
         except Exception as e:
             print(
@@ -170,31 +131,21 @@ class DataFetcher(object):
         try:
             # 检查是否有验证码元素，如果有，则需要人工处理
             self.driver.find_element(By.ID, "verification-code")
-            print(
-                f"check_verification_code：验证码被触发verification-code，等待{crawal_interval}后重试。"
-            )
+            print("check_verification_code：验证码被触发verification-code，等待或人工处理再进行重试。")
+            time.sleep(crawal_interval * 100)
             self.driver.quit()
-            time.sleep(crawal_interval)
             self.driver = init_driver()
             self.err = 0
-            # 更换IPV6地址
-            if enable_proxy:
-                gen_proxy_servers.switch_proxy_server()
             self.get_page(1)
             return False
         except:
             try:
                 self.driver.find_element(By.CLASS_NAME, "alert-title")
-                print(
-                    f"check_verification_code：验证码被触发alert-title，等待{crawal_interval}后重试。"
-                )
+                print("check_verification_code：验证码被触发alert-title，等待后或人工处理再进行重试。")
+                time.sleep(crawal_interval * 100)
                 self.driver.quit()
-                time.sleep(crawal_interval)
                 self.driver = init_driver()
                 self.err = 0
-                # 更换IPV6地址
-                if enable_proxy:
-                    gen_proxy_servers.switch_proxy_server()
                 self.get_page(1)
                 return False
             except:
@@ -239,6 +190,7 @@ class DataFetcher(object):
                 ele.click()
 
                 next_stage_flag = True
+
         except Exception as e:
             # 用f字符串格式化错误类型和错误信息，提供更多的调试信息
             print(
@@ -480,6 +432,10 @@ class DataFetcher(object):
             # 检查注意事项和验证码
             if self.check_verification_code():
                 if self.err < max_retry_time:
+                    if (type(e).__name__) == "ValueError":
+                        # 刷新页面
+                        print("get_data：刷新页面")
+                        self.driver.refresh()
                     # 重试
                     print("change_city：重试")
                     self.change_city()
@@ -901,12 +857,11 @@ class DataFetcher(object):
 
             filename = os.path.join(files_dir, f"{self.city[0]}-{self.city[1]}.csv")
 
-            self.df.to_csv(filename, encoding="UTF-8", index=False)
+            self.df.to_csv(filename, encoding="GB18030", index=False)
 
             print("\n数据爬取完成", filename, "\n")
 
             return 0
-
         except Exception as e:
             print("合并数据失败", str(e).split("Stacktrace:")[0])
 
@@ -914,13 +869,6 @@ class DataFetcher(object):
 
 
 if __name__ == "__main__":
-    kill_driver()
-
-    if enable_proxy:
-        gen_proxy_servers.start_proxy_servers(
-            ipv6_count, start_port, proxy_port, base_interface
-        )
-
     driver = init_driver()
 
     citys = gen_citys(crawal_citys)
@@ -942,10 +890,6 @@ if __name__ == "__main__":
                 # 后续运行只需更换出发与目的地
                 Flight_DataFetcher.change_city()
 
-            # 更换IPV6地址
-            if enable_proxy:
-                gen_proxy_servers.switch_proxy_server()
-
             time.sleep(crawal_interval)
 
     # 运行结束退出
@@ -954,8 +898,5 @@ if __name__ == "__main__":
         driver.quit()
     except Exception as e:
         print(f"An error occurred while quitting the driver: {e}")
-
-    if enable_proxy:
-        gen_proxy_servers.stop_proxy_servers(ipv6_count, base_interface)
 
     print("\n程序运行完成！！！！")
