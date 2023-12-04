@@ -67,6 +67,10 @@ def kill_driver():
     os.system(
         """ps -ef | grep selenium | grep -v grep | awk '{print "kill -9" $2}'| sh"""
     )
+    os.system(
+        """ps -ef | grep chromium | grep -v grep | awk '{print "kill -9" $2}'| sh"""
+    )
+
 
 
 def init_driver():
@@ -146,19 +150,13 @@ class DataFetcher(object):
 
     def remove_btn(self):
         try:
-            WebDriverWait(self.driver, max_wait_time).until(
-                lambda d: d.execute_script(
-                    'return typeof jQuery !== "undefined"')
-            )
+            #WebDriverWait(self.driver, max_wait_time).until(lambda d: d.execute_script('return typeof jQuery !== "undefined"'))
             # 移除提醒
-            js_remove = "$('.notice-box').remove();"
-            self.driver.execute_script(js_remove)
+            self.driver.execute_script("document.querySelectorAll('.notice-box').forEach(element => element.remove());")
             # 移除在线客服
-            js_remove = "$('.shortcut').remove();"
-            self.driver.execute_script(js_remove)
+            self.driver.execute_script("document.querySelectorAll('.shortcut, .shortcut-link').forEach(element => element.remove());")
             # 移除分享链接
-            js_remove = "$('.shareline').remove();"
-            self.driver.execute_script(js_remove)
+            self.driver.execute_script("document.querySelectorAll('.shareline').forEach(element => element.remove());")
         except Exception as e:
             print(
                 f'{time.strftime("%Y-%m-%d_%H-%M-%S")} remove_btn:提醒移除失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}'
@@ -647,7 +645,10 @@ class DataFetcher(object):
             else:
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 未知的压缩格式：{file_type}')
 
-            self.dedata = json.loads(self.dedata)
+            if type(self.dedata) == dict:
+                raise TypeError("the JSON object must be str, bytes or bytearray, not dict")
+            else:
+                self.dedata = json.loads(self.dedata)
 
         except Exception as e:
             # 错误次数+1
@@ -818,73 +819,59 @@ class DataFetcher(object):
             priceList = flightlist["priceList"]
 
             # 经济舱，经济舱折扣
-            economy, economy_discount = [], []
+            economy, economy_tax, economy_total, economy_full = [], [], [], []
+            economy_origin_price, economy_tax_price, economy_total_price, economy_full_price = "", "", "", ""
             # 商务舱，商务舱折扣
-            bussiness, bussiness_discount = [], []
+            bussiness, bussiness_tax, bussiness_total, bussiness_full = [], [], [], []
+            bussiness_origin_price, bussiness_tax_price, bussiness_total_price, bussiness_full_price = "", "", "", ""
 
             for price in priceList:
                 adultPrice = price["adultPrice"]
+                adultTax = price["adultTax"]
+                miseryIndex = price["miseryIndex"]
                 cabin = price["cabin"]
-                priceUnitList = dict(
-                    price["priceUnitList"][0]["flightSeatList"][0])
-                try:
-                    discountRate = priceUnitList["discountRate"]
-                except:
-                    discountRate = 1
+
                 # 经济舱
                 if cabin == "Y":
                     economy.append(adultPrice)
-                    economy_discount.append(discountRate)
+                    economy_tax.append(adultTax)
+                    economy_full.append(miseryIndex)
+                    economy_total.append(adultPrice+adultTax)
                 # 商务舱
                 elif cabin == "C":
                     bussiness.append(adultPrice)
-                    bussiness_discount.append(discountRate)
-
+                    bussiness_tax.append(adultTax)
+                    bussiness_full.append(miseryIndex)
+                    bussiness_total.append(adultPrice+adultTax)
+            
             if economy != []:
-                try:
-                    economy_origin = economy[economy_discount.index(1)]
-                except:
-                    economy_origin = int(max(economy) / max(economy_discount))
-
-                if min(economy_discount) != 1:
-                    economy_low = min(economy)
-                    economy_cut = min(economy_discount)
-                else:
-                    economy_low = ""
-                    economy_cut = ""
-
-            else:
-                economy_origin = ""
-                economy_low = ""
-                economy_cut = ""
+                economy_origin_price = min(economy)
+            if economy_tax != []:
+                economy_tax_price = min(economy_tax)
+            if economy_total != []:
+                economy_total_price = min(economy_total)
+            if economy_full != []:
+                economy_full_price = min(economy_full)
 
             if bussiness != []:
-                try:
-                    bussiness_origin = bussiness[bussiness_discount.index(1)]
-                except:
-                    bussiness_origin = int(
-                        max(bussiness) / max(bussiness_discount))
-
-                if min(bussiness_discount) != 1:
-                    bussiness_low = min(bussiness)
-                    bussiness_cut = min(bussiness_discount)
-                else:
-                    bussiness_low = ""
-                    bussiness_cut = ""
-
-            else:
-                bussiness_origin = ""
-                bussiness_low = ""
-                bussiness_cut = ""
+                bussiness_origin_price = min(bussiness)
+            if bussiness_tax != []:
+                bussiness_tax_price = min(bussiness_tax)
+            if bussiness_total != []:
+                bussiness_total_price = min(bussiness_total)
+            if bussiness_full != []:
+                bussiness_full_price = min(bussiness_full)
 
             price_info = {
                 "flightNo": flightNo,
-                "economy_origin": economy_origin,
-                "economy_low": economy_low,
-                "economy_cut": economy_cut,
-                "bussiness_origin": bussiness_origin,
-                "bussiness_low": bussiness_low,
-                "bussiness_cut": bussiness_cut,
+                "economy_origin": economy_origin_price,
+                "economy_tax": economy_tax_price,
+                "economy_total": economy_total_price,
+                "economy_full": economy_full_price,
+                "bussiness_origin": bussiness_origin_price,
+                "bussiness_tax": bussiness_tax_price,
+                "bussiness_total": bussiness_total_price,
+                "bussiness_full": bussiness_full_price,
             }
 
             # self.prices=self.prices.append(price_info,ignore_index=True)
@@ -920,12 +907,6 @@ class DataFetcher(object):
                     "飞机型号",
                     "飞机尺寸",
                     "飞机型号三字码",
-                    "经济舱原价",
-                    "经济舱最低价",
-                    "经济舱折扣",
-                    "商务舱原价",
-                    "商务舱最低价",
-                    "商务舱折扣",
                     "到达准点率",
                     "停留次数",
                 ]
@@ -950,12 +931,6 @@ class DataFetcher(object):
                     "aircraftName",
                     "aircraftSize",
                     "aircraftCode",
-                    "economy_origin",
-                    "economy_low",
-                    "economy_cut",
-                    "bussiness_origin",
-                    "bussiness_low",
-                    "bussiness_cut",
                     "arrivalPunctuality",
                     "stopCount",
                 ]
