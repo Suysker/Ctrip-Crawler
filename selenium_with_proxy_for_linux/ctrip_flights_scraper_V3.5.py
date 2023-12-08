@@ -17,6 +17,15 @@ from selenium.webdriver.support.ui import WebDriverWait
 # 爬取的城市
 crawal_citys = ["上海", "香港", "东京"]
 
+# 爬取日期范围：起始日期。格式'2023-12-01'
+begin_date = None
+
+# 爬取日期范围：结束日期。格式'2023-12-31'
+end_date = None
+
+# 爬取T+N，即N天后
+start_interval = 1
+
 # 爬取的日期
 crawal_days = 60
 
@@ -116,14 +125,31 @@ def gen_citys(crawal_citys):
     return citys
 
 
-def generate_flight_dates(n, days_interval):
+def generate_flight_dates(n, begin_date, end_date, start_interval, days_interval):
     flight_dates = []
-
+    
+    if begin_date:
+        begin_date = dt.strptime(begin_date, "%Y-%m-%d")
+    elif start_interval:
+        begin_date = dt.now() + timedelta(days=start_interval)
+        
     for i in range(0, n, days_interval):
-        flight_date = dt.now() + timedelta(days=i + 1)
+        flight_date = begin_date + timedelta(days=i)
 
         flight_dates.append(flight_date.strftime("%Y-%m-%d"))
-
+    
+    # 如果有结束日期，确保生成的日期不超过结束日期
+    if end_date:
+        end_date = dt.strptime(end_date, "%Y-%m-%d")
+        flight_dates = [date for date in flight_dates if dt.strptime(date, "%Y-%m-%d") <= end_date]
+        # 继续生成日期直到达到或超过结束日期
+        while dt.strptime(flight_dates[-1], "%Y-%m-%d") < end_date:
+            next_date = dt.strptime(flight_dates[-1], "%Y-%m-%d") + timedelta(days=days_interval)
+            if next_date <= end_date:
+                flight_dates.append(next_date.strftime("%Y-%m-%d"))
+            else:
+                break
+    
     return flight_dates
 
 
@@ -148,6 +174,33 @@ class DataFetcher(object):
         self.city = None
         self.err = 0  # 错误重试次数
 
+    def refresh_driver(self):
+        try:
+            self.driver.refresh()
+        except Exception as e:
+            # 错误次数+1
+            self.err += 1
+
+            print(
+                f'{time.strftime("%Y-%m-%d_%H-%M-%S")} refresh_driver:刷新页面失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}'
+            )
+            
+            # 保存错误截图
+            if enable_screenshot:
+                self.driver.save_screenshot(
+                    f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png'
+                )
+            if self.err < max_retry_time:
+                # 刷新页面
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} refresh_driver：刷新页面')
+                self.refresh_driver()
+
+            # 判断错误次数
+            if self.err >= max_retry_time:
+                print(
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,refresh_driver:不继续重试'
+                )
+    
     def remove_btn(self):
         try:
             #WebDriverWait(self.driver, max_wait_time).until(lambda d: d.execute_script('return typeof jQuery !== "undefined"'))
@@ -573,7 +626,7 @@ class DataFetcher(object):
             if self.err < max_retry_time:
                 # 刷新页面
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} get_data：刷新页面')
-                self.driver.refresh()
+                self.refresh_driver()
 
                 # 检查注意事项和验证码
                 if self.check_verification_code():
@@ -645,10 +698,7 @@ class DataFetcher(object):
             else:
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 未知的压缩格式：{file_type}')
 
-            if type(self.dedata) == dict:
-                raise TypeError("the JSON object must be str, bytes or bytearray, not dict")
-            else:
-                self.dedata = json.loads(self.dedata)
+            self.dedata = json.loads(self.dedata)
 
         except Exception as e:
             # 错误次数+1
@@ -670,7 +720,7 @@ class DataFetcher(object):
             if self.err < max_retry_time:
                 # 刷新页面
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} decode_data：刷新页面')
-                self.driver.refresh()
+                self.refresh_driver()
 
                 # 检查注意事项和验证码
                 if self.check_verification_code():
@@ -724,7 +774,7 @@ class DataFetcher(object):
                 else:
                     # 刷新页面
                     print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_data：刷新页面')
-                    self.driver.refresh()
+                    self.refresh_driver()
                     # 检查注意事项和验证码
                     if self.check_verification_code():
                         # 重试
@@ -843,25 +893,29 @@ class DataFetcher(object):
                     bussiness_tax.append(adultTax)
                     bussiness_full.append(miseryIndex)
                     bussiness_total.append(adultPrice+adultTax)
+
+            # 初始化变量
+            economy_min_index = None
+            bussiness_min_index = None
             
-            if economy != []:
-                economy_origin_price = min(economy)
-            if economy_tax != []:
-                economy_tax_price = min(economy_tax)
             if economy_total != []:
                 economy_total_price = min(economy_total)
-            if economy_full != []:
-                economy_full_price = min(economy_full)
-
-            if bussiness != []:
-                bussiness_origin_price = min(bussiness)
-            if bussiness_tax != []:
-                bussiness_tax_price = min(bussiness_tax)
+                economy_min_index = economy_total.index(economy_total_price)
+            
             if bussiness_total != []:
                 bussiness_total_price = min(bussiness_total)
-            if bussiness_full != []:
-                bussiness_full_price = min(bussiness_full)
-
+                bussiness_min_index = bussiness_total.index(bussiness_total_price)
+            
+            if economy_min_index is not None:
+                economy_origin_price = economy[economy_min_index]
+                economy_tax_price = economy_tax[economy_min_index]
+                economy_full_price = economy_full[economy_min_index]
+            
+            if bussiness_min_index is not None:
+                bussiness_origin_price = bussiness[bussiness_min_index]
+                bussiness_tax_price = bussiness_tax[bussiness_min_index]
+                bussiness_full_price = bussiness_full[bussiness_min_index]
+            
             price_info = {
                 "flightNo": flightNo,
                 "economy_origin": economy_origin_price,
@@ -878,7 +932,6 @@ class DataFetcher(object):
             self.prices = pd.concat(
                 [self.prices, pd.DataFrame(price_info, index=[0])], ignore_index=True
             )
-
     def mergedata(self):
         try:
             self.df = self.flights.merge(self.prices, on=["flightNo"])
@@ -976,7 +1029,7 @@ if __name__ == "__main__":
 
     citys = gen_citys(crawal_citys)
 
-    flight_dates = generate_flight_dates(crawal_days, days_interval)
+    flight_dates = generate_flight_dates(crawal_days, begin_date, end_date, start_interval, days_interval)
 
     Flight_DataFetcher = DataFetcher(driver)
 
