@@ -71,6 +71,14 @@ base_interface = "eth0"
 # 调试截图
 enable_screenshot = False
 
+# 允许登录（可能必须要登录才能获取数据）
+login_allowed = True
+
+# 账号
+account = ''
+
+# 密码
+password = ''
 
 def kill_driver():
     os.system(
@@ -79,7 +87,6 @@ def kill_driver():
     os.system(
         """ps -ef | grep chromium | grep -v grep | awk '{print "kill -9" $2}'| sh"""
     )
-
 
 
 def init_driver():
@@ -103,6 +110,7 @@ def init_driver():
     options.add_experimental_option(
         "excludeSwitches", ["enable-automation"]
     )  # 不显示正在受自动化软件控制的提示
+    # options.page_load_strategy = 'eager'  # DOMContentLoaded事件触发即可
     # options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/116.0.1938.69")
     driver = webdriver.Chrome(options=options)
     driver.set_page_load_timeout(300)  # 设置加载超时阈值
@@ -253,6 +261,69 @@ class DataFetcher(object):
                 print("")
                 return True
 
+    def login(self):
+        if login_allowed:
+            try:
+                if len(self.driver.find_elements(By.CLASS_NAME, "lg_loginbox_modal")) == 0:
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:未弹出登录界面')
+                    WebDriverWait(self.driver, max_wait_time).until(EC.presence_of_element_located((By.CLASS_NAME, "tl_nfes_home_header_login_wrapper_siwkn")))
+                    # 点击飞机图标，返回主界面
+                    ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CLASS_NAME, "tl_nfes_home_header_login_wrapper_siwkn")))
+                    ele.click()
+                else:
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:已经弹出登录界面')
+                
+                WebDriverWait(self.driver, max_wait_time).until(EC.presence_of_element_located((By.CLASS_NAME, "r_input.bbz-js-iconable-input")))
+                ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME, "r_input.bbz-js-iconable-input")[0]))
+                ele.send_keys(account)
+                
+                ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME, "bbz-js-iconable-input")[1]))
+                ele.send_keys(password)
+                
+                ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CSS_SELECTOR, '[for="checkboxAgreementInput"]')))
+                ele.click()
+                
+                ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME, "form_btn.form_btn--block")[0]))
+                ele.click()
+                print(
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login：登录成功'
+                )
+                # 保存登录截图
+                if enable_screenshot:
+                    self.driver.save_screenshot(
+                        f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png'
+                    )
+                time.sleep(crawal_interval*3)
+           except Exception as e:
+                # 错误次数+1
+                self.err += 1
+                # 用f字符串格式化错误类型和错误信息，提供更多的调试信息
+                print(
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login：页面加载或元素操作失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}'
+                )
+    
+                # 保存错误截图
+                if enable_screenshot:
+                    self.driver.save_screenshot(
+                        f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png'
+                    )
+                    
+                    
+                if self.err < max_retry_time:
+                    # 刷新页面
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login：刷新页面')
+                    self.refresh_driver()
+                    # 检查注意事项和验证码
+                    if self.check_verification_code():
+                        # 重试
+                        self.login()
+                # 判断错误次数
+                if self.err >= max_retry_time:
+                    print(
+                        f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,login:重新尝试加载页面，这次指定需要重定向到首页'
+                    )
+
+    
     def get_page(self, reset_to_homepage=0):
         next_stage_flag = False
         try:
@@ -697,7 +768,7 @@ class DataFetcher(object):
                 print(buf.read().decode("UTF-8"))
             else:
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 未知的压缩格式：{file_type}')
-
+            
             self.dedata = json.loads(self.dedata)
 
         except Exception as e:
@@ -772,6 +843,13 @@ class DataFetcher(object):
                     self.err = 0
                     return 0
                 else:
+                    if 'needUserLogin' in self.dedata["data"]:
+                        print(
+                            f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,check_data:必须要登录才能查看数据，这次指定需要重定向到首页'
+                        )
+                        # 重新尝试加载页面，这次指定需要重定向到首页
+                        self.login()
+                    
                     # 刷新页面
                     print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_data：刷新页面')
                     self.refresh_driver()
@@ -932,6 +1010,7 @@ class DataFetcher(object):
             self.prices = pd.concat(
                 [self.prices, pd.DataFrame(price_info, index=[0])], ignore_index=True
             )
+
     def mergedata(self):
         try:
             self.df = self.flights.merge(self.prices, on=["flightNo"])
