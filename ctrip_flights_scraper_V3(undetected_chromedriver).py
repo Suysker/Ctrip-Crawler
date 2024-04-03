@@ -6,7 +6,8 @@ import time
 import json
 import requests
 import pandas as pd
-from seleniumwire import webdriver
+from typing import Any
+import seleniumwire.undetected_chromedriver as webdriver
 from datetime import datetime as dt, timedelta
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -79,7 +80,7 @@ def download_stealth_js(file_path, url='https://raw.githubusercontent.com/requir
 
 def init_driver():
     # options = webdriver.ChromeOptions() # 创建一个配置对象
-    options = webdriver.EdgeOptions()  # 创建一个配置对象
+    options = webdriver.ChromeOptions()  # 创建一个配置对象
     options.add_argument("--incognito")  # 隐身模式（无痕模式）
     # options.add_argument('--headless')  # 启用无头模式
     options.add_argument("--no-sandbox")
@@ -94,11 +95,12 @@ def init_driver():
     options.add_argument("--ignore-certificate-errors")
     options.add_argument("--ignore-certificate-errors-spki-list")
     options.add_argument("--ignore-ssl-errors")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])  # 不显示正在受自动化软件控制的提示
+    # options.add_experimental_option("excludeSwitches", ["enable-automation"])  # 不显示正在受自动化软件控制的提示
+    seleniumwireOptions: dict[str, Any] = {"verify_ssl": False}
     # chromeDriverPath = 'C:/Program Files/Google/Chrome/Application/chromedriver' #chromedriver位置
     # options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/116.0.1938.69")
     # driver = webdriver.Chrome(executable_path=self.chromeDriverPath,chrome_options=self.options)
-    driver = webdriver.Edge(options=options)
+    driver = webdriver.Chrome(options=options,seleniumwire_options=seleniumwireOptions)
     
     try:
         download_stealth_js(stealth_js_path)

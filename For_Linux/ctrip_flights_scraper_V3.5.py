@@ -1,3 +1,4 @@
+import gen_proxy_servers
 import magic
 import io
 import os
@@ -30,7 +31,7 @@ start_interval = 1
 crawal_days = 60
 
 # 设置各城市爬取的时间间隔（单位：秒）
-crawal_interval = 5
+crawal_interval = 1
 
 # 日期间隔
 days_interval = 1
@@ -50,6 +51,24 @@ del_info = False
 # 是否重命名DataFrame的列名
 rename_col = True
 
+# 开启代理
+enable_proxy = True
+
+# 生成代理IPV6数量
+ipv6_count = 120
+
+# 起始端口
+start_port = 20000
+
+# 服务端口
+proxy_port = 10000
+
+# 服务器地址
+proxy_address = "127.0.0.1"
+
+# 生成的IPV6接口名称
+base_interface = "eth0"
+
 # 调试截图
 enable_screenshot = False
 
@@ -62,8 +81,22 @@ accounts = ['','']
 # 密码
 passwords = ['','']
 
+# 运行完毕后删除生成的网口
+delete_interface = True
+
 #利用stealth.min.js隐藏selenium特征
 stealth_js_path='./stealth.min.js'
+
+def kill_driver():
+    os.system(
+        """ps -ef | grep selenium | grep -v grep | awk '{print "kill -9" $2}'| sh"""
+    )
+    os.system(
+        """ps -ef | grep chromium | grep -v grep | awk '{print "kill -9" $2}'| sh"""
+    )
+    os.system(
+        """ps -ef | grep chromedriver | grep -v grep | awk '{print "kill -9" $2}'| sh"""
+    )
 
 # 定义下载stealth.min.js的函数
 def download_stealth_js(file_path, url='https://raw.githubusercontent.com/requireCool/stealth.min.js/main/stealth.min.js'):
@@ -78,13 +111,15 @@ def download_stealth_js(file_path, url='https://raw.githubusercontent.com/requir
         print(f"{file_path} already exists, no need to download.")
 
 def init_driver():
-    # options = webdriver.ChromeOptions() # 创建一个配置对象
-    options = webdriver.EdgeOptions()  # 创建一个配置对象
+    options = webdriver.ChromeOptions()  # 创建一个配置对象
+    if enable_proxy:
+        options.add_argument(
+            f"--proxy-server=http://{proxy_address}:{proxy_port}"
+        )  # 指定代理服务器和端口
     options.add_argument("--incognito")  # 隐身模式（无痕模式）
-    # options.add_argument('--headless')  # 启用无头模式
+    options.add_argument("--headless")  # 启用无头模式
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-blink-features")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-extensions")
     options.add_argument("--pageLoadStrategy=eager")
@@ -95,10 +130,11 @@ def init_driver():
     options.add_argument("--ignore-certificate-errors-spki-list")
     options.add_argument("--ignore-ssl-errors")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])  # 不显示正在受自动化软件控制的提示
-    # chromeDriverPath = 'C:/Program Files/Google/Chrome/Application/chromedriver' #chromedriver位置
+    prefs = {"profile.managed_default_content_settings.images": 2}
+    options.add_experimental_option("prefs", prefs)
+    # options.page_load_strategy = 'eager'  # DOMContentLoaded事件触发即可
     # options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/116.0.1938.69")
-    # driver = webdriver.Chrome(executable_path=self.chromeDriverPath,chrome_options=self.options)
-    driver = webdriver.Edge(options=options)
+    driver = webdriver.Chrome(options=options)
     
     try:
         download_stealth_js(stealth_js_path)
@@ -109,7 +145,9 @@ def init_driver():
     except Exception as e:
         print(e)
     
-    driver.maximize_window()
+    driver.set_page_load_timeout(max_wait_time*max_retry_time)  # 设置加载超时阈值
+    # driver.maximize_window()
+    driver.set_window_size(1280, 480)
 
     return driver
 
@@ -156,8 +194,6 @@ def generate_flight_dates(n, begin_date, end_date, start_interval, days_interval
 
 
 # element_to_be_clickable 函数来替代 expected_conditions.element_to_be_clickable 或 expected_conditions.visibility_of_element_located
-
-
 def element_to_be_clickable(element):
     def check_clickable(driver):
         try:
@@ -240,6 +276,9 @@ class DataFetcher(object):
                 time.sleep(crawal_interval*100)
                 self.driver = init_driver()
                 self.err = 0
+                # 更换IPV6地址
+                if enable_proxy:
+                    gen_proxy_servers.switch_proxy_server()
                 self.switch_acc += 1
                 self.get_page(1)
                 return False
@@ -320,6 +359,7 @@ class DataFetcher(object):
                         f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,login:重新尝试加载页面，这次指定需要重定向到首页'
                     )
 
+    
     def get_page(self, reset_to_homepage=0):
         next_stage_flag = False
         try:
@@ -1097,6 +1137,12 @@ class DataFetcher(object):
 
 
 if __name__ == "__main__":
+    kill_driver()
+
+    if enable_proxy:
+        gen_proxy_servers.start_proxy_servers(
+            ipv6_count, start_port, proxy_port, base_interface, delete_interface
+        )
 
     driver = init_driver()
 
@@ -1125,6 +1171,10 @@ if __name__ == "__main__":
                 # 后续运行只需更换出发与目的地
                 Flight_DataFetcher.change_city()
 
+            # 更换IPV6地址
+            if enable_proxy:
+                gen_proxy_servers.switch_proxy_server()
+
             time.sleep(crawal_interval)
 
     # 运行结束退出
@@ -1133,5 +1183,8 @@ if __name__ == "__main__":
         driver.quit()
     except Exception as e:
         print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} An error occurred while quitting the driver: {e}')
+
+    if enable_proxy:
+        gen_proxy_servers.stop_proxy_servers(base_interface, delete_interface)
 
     print(f'\n{time.strftime("%Y-%m-%d_%H-%M-%S")} 程序运行完成！！！！')
