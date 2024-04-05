@@ -5,7 +5,6 @@ import os
 import gzip
 import time
 import json
-import requests
 import pandas as pd
 from seleniumwire import webdriver
 from datetime import datetime as dt, timedelta
@@ -14,9 +13,8 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-
 # 爬取的城市
-crawal_citys = ["上海", "香港", "东京"]
+crawl_citys = ["上海", "香港", "东京"]
 
 # 爬取日期范围：起始日期。格式'2023-12-01'
 begin_date = None
@@ -28,10 +26,10 @@ end_date = None
 start_interval = 1
 
 # 爬取的日期
-crawal_days = 60
+crawl_days = 60
 
 # 设置各城市爬取的时间间隔（单位：秒）
-crawal_interval = 1
+crawl_interval = 1
 
 # 日期间隔
 days_interval = 1
@@ -57,16 +55,7 @@ enable_proxy = True
 # 生成代理IPV6数量
 ipv6_count = 120
 
-# 起始端口
-start_port = 20000
-
-# 服务端口
-proxy_port = 10000
-
-# 服务器地址
-proxy_address = "127.0.0.1"
-
-# 生成的IPV6接口名称
+# 生成的IPV6接口前缀名称
 base_interface = "eth0"
 
 # 调试截图
@@ -81,11 +70,11 @@ accounts = ['','']
 # 密码
 passwords = ['','']
 
-# 运行完毕后删除生成的网口
-delete_interface = True
+#切换IP模式
+ip_mode ='normal'
 
-#利用stealth.min.js隐藏selenium特征
-stealth_js_path='./stealth.min.js'
+# 运行完毕后删除生成的网口
+delete_interface = False
 
 def kill_driver():
     os.system(
@@ -98,24 +87,8 @@ def kill_driver():
         """ps -ef | grep chromedriver | grep -v grep | awk '{print "kill -9" $2}'| sh"""
     )
 
-# 定义下载stealth.min.js的函数
-def download_stealth_js(file_path, url='https://raw.githubusercontent.com/requireCool/stealth.min.js/main/stealth.min.js'):
-    if not os.path.exists(file_path):
-        print(f"{file_path} not found, downloading...")
-        response = requests.get(url)
-        response.raise_for_status()  # 确保请求成功
-        with open(file_path, 'w') as file:
-            file.write(response.text)
-        print(f"{file_path} downloaded.")
-    else:
-        print(f"{file_path} already exists, no need to download.")
-
 def init_driver():
     options = webdriver.ChromeOptions()  # 创建一个配置对象
-    if enable_proxy:
-        options.add_argument(
-            f"--proxy-server=http://{proxy_address}:{proxy_port}"
-        )  # 指定代理服务器和端口
     options.add_argument("--incognito")  # 隐身模式（无痕模式）
     options.add_argument("--headless")  # 启用无头模式
     options.add_argument("--no-sandbox")
@@ -129,22 +102,14 @@ def init_driver():
     options.add_argument("--ignore-certificate-errors")
     options.add_argument("--ignore-certificate-errors-spki-list")
     options.add_argument("--ignore-ssl-errors")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])  # 不显示正在受自动化软件控制的提示
     prefs = {"profile.managed_default_content_settings.images": 2}
     options.add_experimental_option("prefs", prefs)
+    options.add_experimental_option(
+        "excludeSwitches", ["enable-automation"]
+    )  # 不显示正在受自动化软件控制的提示
     # options.page_load_strategy = 'eager'  # DOMContentLoaded事件触发即可
     # options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/116.0.1938.69")
     driver = webdriver.Chrome(options=options)
-    
-    try:
-        download_stealth_js(stealth_js_path)
-        # 读取并注入stealth.min.js
-        with open(stealth_js_path, 'r') as file:
-            stealth_js = file.read()
-            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": stealth_js})
-    except Exception as e:
-        print(e)
-    
     driver.set_page_load_timeout(max_wait_time*max_retry_time)  # 设置加载超时阈值
     # driver.maximize_window()
     driver.set_window_size(1280, 480)
@@ -152,11 +117,11 @@ def init_driver():
     return driver
 
 
-def gen_citys(crawal_citys):
+def gen_citys(crawl_citys):
     # 生成城市组合列表
     citys = []
-    ytic = list(reversed(crawal_citys))
-    for m in crawal_citys:
+    ytic = list(reversed(crawl_citys))
+    for m in crawl_citys:
         for n in ytic:
             if m == n:
                 continue
@@ -270,15 +235,15 @@ class DataFetcher(object):
             # 检查是否有验证码元素，如果有，则需要人工处理
             if (len(self.driver.find_elements(By.ID, "verification-code"))+len(self.driver.find_elements(By.CLASS_NAME, "alert-title"))):
                 print(
-                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code：验证码被触发verification-code/alert-title，等待{crawal_interval*100}后重试。'
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code：验证码被触发verification-code/alert-title，等待{crawl_interval*100}后重试。'
                 )
                 self.driver.quit()
-                time.sleep(crawal_interval*100)
+                time.sleep(crawl_interval*100)
                 self.driver = init_driver()
                 self.err = 0
                 # 更换IPV6地址
                 if enable_proxy:
-                    gen_proxy_servers.switch_proxy_server()
+                    gen_proxy_servers.switch_proxy_server(ip_mode)
                 self.switch_acc += 1
                 self.get_page(1)
                 return False
@@ -324,13 +289,17 @@ class DataFetcher(object):
                 
                 ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME, "form_btn.form_btn--block")[0]))
                 ele.click()
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login：登录成功')
+                print(
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login：登录成功'
+                )
                 # 保存登录截图
                 if enable_screenshot:
                     self.driver.save_screenshot(
                         f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png'
                     )
-                time.sleep(crawal_interval*3)
+                time.sleep(crawl_interval*3)
+                
+                self.driver.refresh()
             except Exception as e:
                 # 错误次数+1
                 self.err += 1
@@ -1141,14 +1110,14 @@ if __name__ == "__main__":
 
     if enable_proxy:
         gen_proxy_servers.start_proxy_servers(
-            ipv6_count, start_port, proxy_port, base_interface, delete_interface
+            ipv6_count, ip_mode, base_interface, delete_interface
         )
 
     driver = init_driver()
 
-    citys = gen_citys(crawal_citys)
+    citys = gen_citys(crawl_citys)
 
-    flight_dates = generate_flight_dates(crawal_days, begin_date, end_date, start_interval, days_interval)
+    flight_dates = generate_flight_dates(crawl_days, begin_date, end_date, start_interval, days_interval)
 
     Flight_DataFetcher = DataFetcher(driver)
 
@@ -1162,7 +1131,7 @@ if __name__ == "__main__":
                 print(
                     f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 文件已存在:{os.path.join(os.getcwd(), flight_date, dt.now().strftime("%Y-%m-%d"), f"{city[0]}-{city[1]}.csv")}')
                 continue
-            elif ('http' not in Flight_DataFetcher.driver.current_url):
+            elif (Flight_DataFetcher.driver.current_url=="data:,"):
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 当前的URL是：{driver.current_url}')
                 # 初始化页面
                 Flight_DataFetcher.get_page(1)
@@ -1173,9 +1142,9 @@ if __name__ == "__main__":
 
             # 更换IPV6地址
             if enable_proxy:
-                gen_proxy_servers.switch_proxy_server()
+                gen_proxy_servers.switch_proxy_server(ip_mode)
 
-            time.sleep(crawal_interval)
+            time.sleep(crawl_interval)
 
     # 运行结束退出
     try:
