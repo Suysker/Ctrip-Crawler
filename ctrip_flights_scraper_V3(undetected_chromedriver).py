@@ -593,6 +593,13 @@ class DataFetcher(object):
                     # Enter搜索
                     # ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(its[1]))
                     # ele.send_keys(Keys.ENTER)
+                    ele = WebDriverWait(self.driver, max_wait_time).until(
+                        element_to_be_clickable(
+                            self.driver.find_elements(
+                                By.CLASS_NAME, "form-input-v3")[0]
+                        )
+                    )
+                    ele.click()
 
                     # 通过低价提醒按钮实现enter键换页
                     ele = WebDriverWait(self.driver, max_wait_time).until(
@@ -610,6 +617,13 @@ class DataFetcher(object):
                     # Enter搜索
                     # ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(its[1]))
                     # ele.send_keys(Keys.ENTER)
+                    ele = WebDriverWait(self.driver, max_wait_time).until(
+                        element_to_be_clickable(
+                            self.driver.find_elements(
+                                By.CLASS_NAME, "form-input-v3")[1]
+                        )
+                    )
+                    ele.click()
 
                     # 通过低价提醒按钮实现enter键换页
                     ele = WebDriverWait(self.driver, max_wait_time).until(
