@@ -12,17 +12,16 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from datetime import datetime
-
+import threading
 
 # 爬取的城市
-crawal_citys = ["天津",  "泉州"]
+crawal_citys = ["上海", "香港", "东京"]
 
 # 爬取日期范围：起始日期。格式'2023-12-01'
-begin_date = "2024-10-29"
+begin_date = None
 
 # 爬取日期范围：结束日期。格式'2023-12-31'
-end_date = "2024-11-03"
+end_date = None
 
 # 爬取T+N，即N天后
 start_interval = 1
@@ -43,12 +42,15 @@ max_wait_time = 10
 max_retry_time = 5
 
 # 是否只抓取直飞信息（True: 只抓取直飞，False: 抓取所有航班）
-direct_flight = False
+direct_flight = True
+
+# 是否抓取航班舒适信息（True: 抓取，False: 不抓取）
+comft_flight = True
 
 # 是否删除不重要的信息
 del_info = False
 
-# 是否重命DataFrame的列名
+# 是否重命名DataFrame的列名
 rename_col = True
 
 # 调试截图
@@ -79,7 +81,8 @@ def download_stealth_js(file_path, url='https://raw.githubusercontent.com/requir
         print(f"{file_path} already exists, no need to download.")
 
 def init_driver():
-    options = webdriver.ChromeOptions()  # 改为ChromeOptions
+    # options = webdriver.ChromeOptions() # 创建一个配置对象
+    options = webdriver.EdgeOptions()  # 创建一个配置对象
     options.add_argument("--incognito")  # 隐身模式（无痕模式）
     # options.add_argument('--headless')  # 启用无头模式
     options.add_argument("--no-sandbox")
@@ -157,8 +160,6 @@ def generate_flight_dates(n, begin_date, end_date, start_interval, days_interval
 
 
 # element_to_be_clickable 函数来替代 expected_conditions.element_to_be_clickable 或 expected_conditions.visibility_of_element_located
-
-
 def element_to_be_clickable(element):
     def check_clickable(driver):
         try:
@@ -179,7 +180,7 @@ class DataFetcher(object):
         self.city = None
         self.err = 0  # 错误重试次数
         self.switch_acc = 0 #切换账户
-        self.comfort_data = None  # 新添加的属性
+        self.comfort_data = None  # 航班舒适度信息
 
     def refresh_driver(self):
         try:
@@ -236,20 +237,40 @@ class DataFetcher(object):
             # 检查是否有验证码元素，如果有，则需要人工处理
             if (len(self.driver.find_elements(By.ID, "verification-code")) + len(self.driver.find_elements(By.CLASS_NAME, "alert-title"))):
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code：验证码被触发verification-code/alert-title，请手动完成验证。')
-                
+    
+                user_input_completed = threading.Event()
                 # 等待用户手动处理验证码
-                input("请完成验证码，然后按回车键继续...")
-                
-                # 等待页面加载完成
-                WebDriverWait(self.driver, max_wait_time).until(
-                    EC.presence_of_element_located((By.CLASS_NAME, "pc_home-jipiao"))
-                )
-                
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code：验证码处理完成，继续执行。')
-                
-                # 移除注意事项
-                self.remove_btn()
-                return True
+                def wait_for_input():
+                    input("请完成验证码，然后按回车键继续...")
+                    user_input_completed.set()
+    
+                input_thread = threading.Thread(target=wait_for_input)
+                input_thread.start()
+    
+                # 设置手动验证超时时间
+                timeout_seconds = crawal_interval * 100
+    
+                input_thread.join(timeout=timeout_seconds)
+    
+                if user_input_completed.is_set():
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code：验证码处理完成，继续执行。')
+    
+                    # 等待页面加载完成
+                    WebDriverWait(self.driver, max_wait_time).until(
+                        EC.presence_of_element_located((By.CLASS_NAME, "pc_home-jipiao"))
+                    )
+                    
+                    # 移除注意事项
+                    self.remove_btn()
+                    return True
+                else:
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code: 手动验证超时 {timeout_seconds} 秒')
+                    self.driver.quit()
+                    self.driver = init_driver()
+                    self.err = 0
+                    self.switch_acc += 1
+                    self.get_page(1)
+                    return False
             else:
                 # 移除注意事项
                 self.remove_btn()
@@ -410,6 +431,7 @@ class DataFetcher(object):
                 self.change_city()
             else:
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 页面加载成功，但未能完成所有操作')
+
     def change_city(self):
         next_stage_flag = False
         try:
@@ -560,7 +582,7 @@ class DataFetcher(object):
                                 )
                             )
                             print(
-                                f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期{int(self.driver.find_elements(By.CLASS_NAME, "date-picker.date-picker-block")[0].find_element(By.CLASS_NAME, "month").text[:-1])}大于 {int(self.date[5:7])} 左点击'
+                                f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期{int(self.driver.find_elements(By.CLASS_NAME, "date-picker.date-picker-block")[0].find_element(By.CLASS_NAME, "month").text[:-1])}大于 {int(self.date[5:7])} 向左点击'
                             )
                             ele.click()
                             
@@ -718,12 +740,12 @@ class DataFetcher(object):
             self.predata = self.driver.wait_for_request(
                 "/international/search/api/search/batchSearch?.*", timeout=max_wait_time
             )
-            # 捕获 getFlightComfort 数据
-            self.comfort_data = self.capture_flight_comfort_data()
+            
+            if comft_flight:
+                # 捕获 getFlightComfort 数据
+                self.comfort_data = self.capture_flight_comfort_data()
             
             rb = dict(json.loads(self.predata.body).get("flightSegments")[0])
-
-
 
         except Exception as e:
             # 错误次数+1
@@ -755,7 +777,7 @@ class DataFetcher(object):
             # 判断错误次数
             if self.err >= max_retry_time:
                 print(
-                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 误次数【{self.err}-{max_retry_time}】,get_data:重新尝试加载页面，这次指定需要重定向到首页'
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,get_data:重新尝试加载页面，这次指定需要重定向到首页'
                 )
 
                 # 重置错误计数
@@ -790,7 +812,7 @@ class DataFetcher(object):
                         f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png'
                     )
 
-                # 重新更换城
+                # 重新更换城市
                 print(
                     f'{time.strftime("%Y-%m-%d_%H-%M-%S")} get_data：重新更换城市:{rb["departureCityName"]}-{rb["arrivalCityName"]}-{rb["departureDate"]}'
                 )
@@ -842,7 +864,7 @@ class DataFetcher(object):
 
                 # 检查注意事项和验证码
                 if self.check_verification_code():
-                    # 试
+                    # 重试
                     self.get_data()
             # 判错误次数
             if self.err >= max_retry_time:
@@ -859,7 +881,7 @@ class DataFetcher(object):
             # 重置错误计数
             self.err = 0
 
-            # 若无误，执行下一步
+            # 若无错误，执行下一步
             self.check_data()
 
     def check_data(self):
@@ -960,7 +982,7 @@ class DataFetcher(object):
                     "arrivalAirportShortName",
                     "arrivalTerminal",
                     "transferDuration",
-                    "stopList",  # 删除原始的 stopList
+                    "stopList",
                     "leakedVisaTagSwitch",
                     "trafficType",
                     "highLightPlaneNo",
@@ -1013,10 +1035,11 @@ class DataFetcher(object):
                 adultPrice = price["adultPrice"]
                 childPrice = price.get("childPrice", adultPrice)  # 如果没有childPrice，使用adultPrice
                 freeOilFeeAndTax = price["freeOilFeeAndTax"]
-                sortPrice = price["sortPrice"]
-
+                sortPrice = price.get("sortPrice", adultPrice)  # 如果没有sortPrice，使用adultPrice
+                
                 # 估算税费（如果需要的话）
                 estimatedTax = sortPrice - adultPrice if not freeOilFeeAndTax else 0
+                adultTax = price.get("adultTax", estimatedTax)  # 如果没有adultTax，使用estimatedTax
 
                 miseryIndex = price["miseryIndex"]
                 cabin = price["cabin"]
@@ -1024,15 +1047,15 @@ class DataFetcher(object):
                 # 经济舱
                 if cabin == "Y":
                     economy.append(adultPrice)
-                    economy_tax.append(estimatedTax)
+                    economy_tax.append(adultTax)
                     economy_full.append(miseryIndex)
-                    economy_total.append(adultPrice+estimatedTax)
+                    economy_total.append(adultPrice+adultTax)
                 # 商务舱
                 elif cabin == "C":
                     bussiness.append(adultPrice)
-                    bussiness_tax.append(estimatedTax)
+                    bussiness_tax.append(adultTax)
                     bussiness_full.append(miseryIndex)
-                    bussiness_total.append(adultPrice+estimatedTax)
+                    bussiness_total.append(adultPrice+adultTax)
 
             # 初始化变量
             economy_min_index = None
@@ -1083,6 +1106,54 @@ class DataFetcher(object):
 
             print(f"获取到的舒适度数据: {self.comfort_data}")
             
+            # 数据的列名映射
+            columns = {
+                "dateGetTime": "数据获取日期",
+                "flightNo": "航班号",
+                "marketAirlineName": "航空公司",
+                "departureday": "出发日期",
+                "departuretime": "出发时间",
+                "arrivalday": "到达日期",
+                "arrivaltime": "到达时间",
+                "duration": "飞行时长",
+                "departureCountryName": "出发国家",
+                "departureCityName": "出发城市",
+                "departureAirportName": "出发机场",
+                "departureAirportCode": "出发机场三字码",
+                "arrivalCountryName": "到达国家",
+                "arrivalCityName": "到达城市",
+                "arrivalAirportName": "到达机场",
+                "arrivalAirportCode": "到达机场三字码",
+                "aircraftName": "飞机型号",
+                "aircraftSize": "飞机尺寸",
+                "aircraftCode": "飞机型号三字码",
+                "arrivalPunctuality": "到达准点率",
+                "stopCount": "停留次数",
+                "stopInfo": "中转信息"
+            }
+            
+            # 定义舒适度数据的列名映射
+            comfort_columns = {
+                'departure_delay_time': '出发延误时间',
+                'departure_bridge_rate': '出发廊桥率',
+                'arrival_delay_time': '到达延误时间',
+                'plane_type': '飞机类型',
+                'plane_width': '飞机宽度',
+                'plane_age': '飞机机龄',
+                'Y_has_meal': '经济舱是否有餐食',
+                'Y_seat_tilt': '经济舱座椅倾斜度',
+                'Y_seat_width': '经济舱座椅宽度',
+                'Y_seat_pitch': '经济舱座椅间距',
+                'Y_meal_msg': '经济舱餐食信息',
+                'Y_power': '经济舱电源',
+                'C_has_meal': '商务舱是否有餐食',
+                'C_seat_tilt': '商务舱座椅倾斜度',
+                'C_seat_width': '商务舱座椅宽度',
+                'C_seat_pitch': '商务舱座椅间距',
+                'C_meal_msg': '商务舱餐食信息',
+                'C_power': '商务舱电源',
+            }
+            
             if self.comfort_data:
                 comfort_df = pd.DataFrame.from_dict(self.comfort_data, orient='index')
                 comfort_df.reset_index(inplace=True)
@@ -1112,89 +1183,21 @@ class DataFetcher(object):
                 
                 # 删除临时列和多余的flight_no列
                 self.df.drop(['match_flight_no', 'flight_no'], axis=1, inplace=True, errors='ignore')
-
+            else:
+                # 如果没有舒适度数据，手动添加空列，保证数据结构一致性
+                for col in comfort_columns.keys():
+                    self.df[col] = None  # 添加缺失的舒适度列并填充为空值
 
             if rename_col:
+                order = list(columns.values())
                 # 对pandas的columns进行重命名
-                order = [
-                    "数据获取日期",
-                    "航班号",
-                    "航空公司",
-                    "出发日期",
-                    "出发时间",
-                    "到达日期",
-                    "到达时间",
-                    "飞行时长",
-                    "出发国家",
-                    "出发城市",
-                    "出发机场",
-                    "出发机场三字码",
-                    "到达国家",
-                    "到达城市",
-                    "到达机场",
-                    "到达机场三字码",
-                    "飞机型号",
-                    "飞机尺寸",
-                    "飞机型号三字码",
-                    "到达准点率",
-                    "停留次数",
-                    "中转信息",  # 新增字段
-                ]
-
-                origin = [
-                    "dateGetTime",
-                    "flightNo",
-                    "marketAirlineName",
-                    "departureday",
-                    "departuretime",
-                    "arrivalday",
-                    "arrivaltime",
-                    "duration",
-                    "departureCountryName",
-                    "departureCityName",
-                    "departureAirportName",
-                    "departureAirportCode",
-                    "arrivalCountryName",
-                    "arrivalCityName",
-                    "arrivalAirportName",
-                    "arrivalAirportCode",
-                    "aircraftName",
-                    "aircraftSize",
-                    "aircraftCode",
-                    "arrivalPunctuality",
-                    "stopCount",
-                    "stopInfo",  # 新增字段
-                ]
-
-                columns = dict(zip(origin, order))
-
-                # 添加舒适度数据的列名映射
-                comfort_columns = {
-                    'departure_delay_time': '出发延误时间',
-                    'departure_bridge_rate': '出发廊桥率',
-                    'arrival_delay_time': '到达延误时间',
-                    'plane_type': '飞机类型',
-                    'plane_width': '飞机宽度',
-                    'plane_age': '飞机机龄',
-                    'Y_has_meal': '经济舱是否有餐食',
-                    'Y_seat_tilt': '经济舱座椅倾斜度',
-                    'Y_seat_width': '经济舱座椅宽度',
-                    'Y_seat_pitch': '经济舱座椅间距',
-                    'Y_meal_msg': '经济舱餐食信息',
-                    'Y_power': '经济舱电源',
-                    'C_has_meal': '商务舱是否有餐食',
-                    'C_seat_tilt': '商务舱座椅倾斜度',
-                    'C_seat_width': '商务舱座椅宽度',
-                    'C_seat_pitch': '商务舱座椅间距',
-                    'C_meal_msg': '商务舱餐食信息',
-                    'C_power': '商务舱电源',
-                }
-                columns.update(comfort_columns)
+                columns.update(comfort_columns, errors='ignore')
 
                 self.df = self.df.rename(columns=columns)
 
                 if del_info:
-                    self.df = self.df[order + list(comfort_columns.values())]
+                    # 使用 reindex 确保所有列都存在于最终的 DataFrame 中，不存在的列会被自动忽略
+                    self.df = self.df.reindex(columns=order, fill_value=None)
 
             files_dir = os.path.join(
                 os.getcwd(), self.date, dt.now().strftime("%Y-%m-%d")
@@ -1284,12 +1287,12 @@ class DataFetcher(object):
                                 cabin_info = {cabin['cabin']: cabin for cabin in flight_comfort['cabinInfoList']}
                                 
                                 processed_data = {
-                                    'departure_delay_time': punctuality['departureDelaytime'],
-                                    'departure_bridge_rate': punctuality['departureBridge'],
-                                    'arrival_delay_time': punctuality['arrivalDelaytime'],
-                                    'plane_type': plane_info['planeTypeName'],
-                                    'plane_width': plane_info['planeWidthCategory'],
-                                    'plane_age': plane_info['planeAge']
+                                    'departure_delay_time': punctuality.get("departureDelaytime", None),
+                                    'departure_bridge_rate': punctuality.get("departureBridge", None),
+                                    'arrival_delay_time': punctuality.get("arrivalDelaytime", None),
+                                    'plane_type': plane_info.get("planeTypeName", None),
+                                    'plane_width': plane_info.get("planeWidthCategory", None),
+                                    'plane_age': plane_info.get("planeAge", None)
                                 }
                                 
                                 for cabin_type in ['Y', 'C']:
