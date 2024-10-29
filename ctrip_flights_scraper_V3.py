@@ -45,7 +45,7 @@ max_retry_time = 5
 direct_flight = True
 
 # 是否抓取航班舒适信息（True: 抓取，False: 不抓取）
-comft_flight = True
+comft_flight = False
 
 # 是否删除不重要的信息
 del_info = False
@@ -98,11 +98,11 @@ def init_driver():
     options.add_argument("--ignore-certificate-errors-spki-list")
     options.add_argument("--ignore-ssl-errors")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])  # 不显示正在受自动化软件控制的提示
-    
     # 如果需要指定Chrome驱动的路径，取消下面这行的注释并设置正确的路径
     # chromedriver_path = '/path/to/chromedriver'
-    
-    driver = webdriver.Chrome(options=options)  # 改为Chrome，如果需要指定路径，可以加上executable_path参数
+    # 如果需要指定路径，可以加上executable_path参数
+    # driver = webdriver.Chrome(options=options)  
+    driver = webdriver.Edge(options=options)
     
     try:
         download_stealth_js(stealth_js_path)
@@ -117,7 +117,6 @@ def init_driver():
 
     return driver
 
-
 def gen_citys(crawal_citys):
     # 生成城市组合表
     citys = []
@@ -129,7 +128,6 @@ def gen_citys(crawal_citys):
             else:
                 citys.append([m, n])
     return citys
-
 
 def generate_flight_dates(n, begin_date, end_date, start_interval, days_interval):
     flight_dates = []
@@ -158,7 +156,6 @@ def generate_flight_dates(n, begin_date, end_date, start_interval, days_interval
     
     return flight_dates
 
-
 # element_to_be_clickable 函数来替代 expected_conditions.element_to_be_clickable 或 expected_conditions.visibility_of_element_located
 def element_to_be_clickable(element):
     def check_clickable(driver):
@@ -171,7 +168,6 @@ def element_to_be_clickable(element):
             return False
 
     return check_clickable
-
 
 class DataFetcher(object):
     def __init__(self, driver):
@@ -219,7 +215,7 @@ class DataFetcher(object):
             # 移除分享链接
             self.driver.execute_script("document.querySelectorAll('.shareline').forEach(element => element.remove());")
             '''
-            # 使用JavaScript除有的<dl>标签
+            # 使用JavaScript删除有的<dl>标签
             self.driver.execute_script("""
                 var elements = document.getElementsByTagName('dl');
                 while(elements.length > 0){
@@ -295,7 +291,7 @@ class DataFetcher(object):
                     # 点击飞机图标，返回主界面
                     ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CLASS_NAME, "tl_nfes_home_header_login_wrapper_siwkn")))
                     ele.click()
-                    #等待页面加
+                    #等待页面加载
                     WebDriverWait(self.driver, max_wait_time).until(EC.presence_of_element_located((By.CLASS_NAME, "lg_loginwrap")))
                 else:
                     print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:已经弹出登录界面')
@@ -326,7 +322,7 @@ class DataFetcher(object):
                 self.err += 1
                 # 用f字符串格式化错误类型和错误信息，提供更多的调试信息
                 print(
-                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login：页面加载或元素操作失败，错误类型：{type(e).__name__}, 详细误信息：{str(e).split("Stacktrace:")[0]}'
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login：页面加载或元素操作失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}'
                 )
     
                 # 保存错误截图
@@ -698,7 +694,7 @@ class DataFetcher(object):
                 )
 
             print(
-                f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,change_city：更换市和日期失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}'
+                f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,change_city：更换城市和日期失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}'
             )
 
             # 检查注意事项和验证码
@@ -721,7 +717,7 @@ class DataFetcher(object):
                     # 删除本次请求
                     del self.driver.requests
 
-                    # 置错计数
+                    # 重置错误计数
                     self.err = 0
 
                     # 重新尝试加载页面，这次指定需要重定向到首页
@@ -866,7 +862,7 @@ class DataFetcher(object):
                 if self.check_verification_code():
                     # 重试
                     self.get_data()
-            # 判错误次数
+            # 判错错误次数
             if self.err >= max_retry_time:
                 print(
                     f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,decode_data:重新尝试加载页面，这次指定需要重定向到首页'
