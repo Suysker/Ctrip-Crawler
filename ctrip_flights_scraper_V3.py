@@ -12,7 +12,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-
+import threading
 
 # 爬取的城市
 crawal_citys = ["上海", "香港", "东京"]
@@ -43,6 +43,9 @@ max_retry_time = 5
 
 # 是否只抓取直飞信息（True: 只抓取直飞，False: 抓取所有航班）
 direct_flight = True
+
+# 是否抓取航班舒适信息（True: 抓取，False: 不抓取）
+comft_flight = False
 
 # 是否删除不重要的信息
 del_info = False
@@ -95,9 +98,10 @@ def init_driver():
     options.add_argument("--ignore-certificate-errors-spki-list")
     options.add_argument("--ignore-ssl-errors")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])  # 不显示正在受自动化软件控制的提示
-    # chromeDriverPath = 'C:/Program Files/Google/Chrome/Application/chromedriver' #chromedriver位置
-    # options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/116.0.1938.69")
-    # driver = webdriver.Chrome(executable_path=self.chromeDriverPath,chrome_options=self.options)
+    # 如果需要指定Chrome驱动的路径，取消下面这行的注释并设置正确的路径
+    # chromedriver_path = '/path/to/chromedriver'
+    # 如果需要指定路径，可以加上executable_path参数
+    # driver = webdriver.Chrome(options=options)  
     driver = webdriver.Edge(options=options)
     
     try:
@@ -113,9 +117,8 @@ def init_driver():
 
     return driver
 
-
 def gen_citys(crawal_citys):
-    # 生成城市组合列表
+    # 生成城市组合表
     citys = []
     ytic = list(reversed(crawal_citys))
     for m in crawal_citys:
@@ -125,7 +128,6 @@ def gen_citys(crawal_citys):
             else:
                 citys.append([m, n])
     return citys
-
 
 def generate_flight_dates(n, begin_date, end_date, start_interval, days_interval):
     flight_dates = []
@@ -154,10 +156,7 @@ def generate_flight_dates(n, begin_date, end_date, start_interval, days_interval
     
     return flight_dates
 
-
 # element_to_be_clickable 函数来替代 expected_conditions.element_to_be_clickable 或 expected_conditions.visibility_of_element_located
-
-
 def element_to_be_clickable(element):
     def check_clickable(driver):
         try:
@@ -170,7 +169,6 @@ def element_to_be_clickable(element):
 
     return check_clickable
 
-
 class DataFetcher(object):
     def __init__(self, driver):
         self.driver = driver
@@ -178,6 +176,7 @@ class DataFetcher(object):
         self.city = None
         self.err = 0  # 错误重试次数
         self.switch_acc = 0 #切换账户
+        self.comfort_data = None  # 航班舒适度信息
 
     def refresh_driver(self):
         try:
@@ -216,7 +215,7 @@ class DataFetcher(object):
             # 移除分享链接
             self.driver.execute_script("document.querySelectorAll('.shareline').forEach(element => element.remove());")
             '''
-            # 使用JavaScript删除所有的<dl>标签
+            # 使用JavaScript删除有的<dl>标签
             self.driver.execute_script("""
                 var elements = document.getElementsByTagName('dl');
                 while(elements.length > 0){
@@ -232,17 +231,42 @@ class DataFetcher(object):
     def check_verification_code(self):
         try:
             # 检查是否有验证码元素，如果有，则需要人工处理
-            if (len(self.driver.find_elements(By.ID, "verification-code"))+len(self.driver.find_elements(By.CLASS_NAME, "alert-title"))):
-                print(
-                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code：验证码被触发verification-code/alert-title，等待{crawal_interval*100}后重试。'
-                )
-                self.driver.quit()
-                time.sleep(crawal_interval*100)
-                self.driver = init_driver()
-                self.err = 0
-                self.switch_acc += 1
-                self.get_page(1)
-                return False
+            if (len(self.driver.find_elements(By.ID, "verification-code")) + len(self.driver.find_elements(By.CLASS_NAME, "alert-title"))):
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code：验证码被触发verification-code/alert-title，请手动完成验证。')
+    
+                user_input_completed = threading.Event()
+                # 等待用户手动处理验证码
+                def wait_for_input():
+                    input("请完成验证码，然后按回车键继续...")
+                    user_input_completed.set()
+    
+                input_thread = threading.Thread(target=wait_for_input)
+                input_thread.start()
+    
+                # 设置手动验证超时时间
+                timeout_seconds = crawal_interval * 100
+    
+                input_thread.join(timeout=timeout_seconds)
+    
+                if user_input_completed.is_set():
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code：验证码处理完成，继续执行。')
+    
+                    # 等待页面加载完成
+                    WebDriverWait(self.driver, max_wait_time).until(
+                        EC.presence_of_element_located((By.CLASS_NAME, "pc_home-jipiao"))
+                    )
+                    
+                    # 移除注意事项
+                    self.remove_btn()
+                    return True
+                else:
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code: 手动验证超时 {timeout_seconds} 秒')
+                    self.driver.quit()
+                    self.driver = init_driver()
+                    self.err = 0
+                    self.switch_acc += 1
+                    self.get_page(1)
+                    return False
             else:
                 # 移除注意事项
                 self.remove_btn()
@@ -252,6 +276,7 @@ class DataFetcher(object):
             print(
                 f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code:未知错误，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}'
             )
+            return False
 
     def login(self):
         if login_allowed:
@@ -324,16 +349,27 @@ class DataFetcher(object):
         next_stage_flag = False
         try:
             if reset_to_homepage == 1:
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 尝试前往首页...')
+                start_time = time.time()
                 # 前往首页
                 self.driver.get(
                     "https://flights.ctrip.com/online/channel/domestic")
+                end_time = time.time()
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 前往首页耗时: {end_time - start_time:.2f} 秒')
+
+            print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 当前页面 URL: {self.driver.current_url}')
+            print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 当前页面标题: {self.driver.title}')
 
             # 检查注意事项和验证码
             if self.check_verification_code():
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 等待页面加载完成...')
                 WebDriverWait(self.driver, max_wait_time).until(
                     EC.presence_of_element_located(
                         (By.CLASS_NAME, "pc_home-jipiao"))
                 )
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 页面加载完成')
+
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 尝试点击飞机图标...')
                 # 点击飞机图标，返回主界面
                 ele = WebDriverWait(self.driver, max_wait_time).until(
                     element_to_be_clickable(
@@ -342,7 +378,9 @@ class DataFetcher(object):
                     )
                 )
                 ele.click()
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 成功点击飞机图标')
 
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 尝试选择单程...')
                 # 单程
                 ele = WebDriverWait(self.driver, max_wait_time).until(
                     element_to_be_clickable(
@@ -351,7 +389,9 @@ class DataFetcher(object):
                     )
                 )
                 ele.click()
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 成功选择单程')
 
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 尝试点击搜索按钮...')
                 # 搜索
                 ele = WebDriverWait(self.driver, max_wait_time).until(
                     element_to_be_clickable(
@@ -359,6 +399,7 @@ class DataFetcher(object):
                     )
                 )
                 ele.click()
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 成功点击搜索按钮')
 
                 next_stage_flag = True
         except Exception as e:
@@ -366,19 +407,26 @@ class DataFetcher(object):
             print(
                 f'{time.strftime("%Y-%m-%d_%H-%M-%S")} get_page：页面加载或元素操作失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}'
             )
+            print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 当前页面 URL: {self.driver.current_url}')
+            print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 当前页面标题: {self.driver.title}')
+            print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 当前页面源代码: {self.driver.page_source[:500]}...')  # 只打印前500个字符
 
             # 保存错误截图
             if enable_screenshot:
-                self.driver.save_screenshot(
-                    f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png'
-                )
+                screenshot_path = f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png'
+                self.driver.save_screenshot(screenshot_path)
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误截图已保存: {screenshot_path}')
 
             # 重新尝试加载页面，这次指定需要重定向到首页
+            print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 重新尝试加载页面，这次指定需要重定向到首页')
             self.get_page(1)
         else:
             if next_stage_flag:
                 # 继续下一步
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 页面加载成功，继续下一步')
                 self.change_city()
+            else:
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 页面加载成功，但未能完成所有操作')
 
     def change_city(self):
         next_stage_flag = False
@@ -688,7 +736,11 @@ class DataFetcher(object):
             self.predata = self.driver.wait_for_request(
                 "/international/search/api/search/batchSearch?.*", timeout=max_wait_time
             )
-
+            
+            if comft_flight:
+                # 捕获 getFlightComfort 数据
+                self.comfort_data = self.capture_flight_comfort_data()
+            
             rb = dict(json.loads(self.predata.body).get("flightSegments")[0])
 
         except Exception as e:
@@ -728,7 +780,6 @@ class DataFetcher(object):
                 self.err = 0
                 # 重新尝试加载页面，这次指定需要重定向到首页
                 self.get_page(1)
-
         else:
             # 删除本次请求
             del self.driver.requests
@@ -811,7 +862,7 @@ class DataFetcher(object):
                 if self.check_verification_code():
                     # 重试
                     self.get_data()
-            # 判断错误次数
+            # 判错错误次数
             if self.err >= max_retry_time:
                 print(
                     f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,decode_data:重新尝试加载页面，这次指定需要重定向到首页'
@@ -902,6 +953,15 @@ class DataFetcher(object):
             arrivalday = flightUnitList["arrivalDateTime"].split(" ")[0]
             arrivaltime = flightUnitList["arrivalDateTime"].split(" ")[1]
 
+            # 处理 stopList
+            if 'stopList' in flightUnitList and flightUnitList['stopList']:
+                stop_info = []
+                for stop in flightUnitList['stopList']:
+                    stop_info.append(f"{stop['cityName']}({stop['airportName']}, {stop['duration']}分钟)")
+                flightUnitList['stopInfo'] = ' -> '.join(stop_info)
+            else:
+                flightUnitList['stopInfo'] = '无中转'
+
             if del_info:
                 # 删除一些不重要的信息
                 dellist = [
@@ -930,10 +990,7 @@ class DataFetcher(object):
                     "operateAirlineName",
                 ]
                 for value in dellist:
-                    try:
-                        flightUnitList.pop(value)
-                    except:
-                        continue
+                    flightUnitList.pop(value, None)
 
             # 更新日期格式
             flightUnitList.update(
@@ -968,8 +1025,18 @@ class DataFetcher(object):
             bussiness_origin_price, bussiness_tax_price, bussiness_total_price, bussiness_full_price = "", "", "", ""
 
             for price in priceList:
+                # print("Price dictionary keys:", price.keys())
+                # print("Full price dictionary:", json.dumps(price, indent=2))
+                
                 adultPrice = price["adultPrice"]
-                adultTax = price["adultTax"]
+                childPrice = price.get("childPrice", adultPrice)  # 如果没有childPrice，使用adultPrice
+                freeOilFeeAndTax = price["freeOilFeeAndTax"]
+                sortPrice = price.get("sortPrice", adultPrice)  # 如果没有sortPrice，使用adultPrice
+                
+                # 估算税费（如果需要的话）
+                estimatedTax = sortPrice - adultPrice if not freeOilFeeAndTax else 0
+                adultTax = price.get("adultTax", estimatedTax)  # 如果没有adultTax，使用estimatedTax
+
                 miseryIndex = price["miseryIndex"]
                 cabin = price["cabin"]
 
@@ -1028,65 +1095,105 @@ class DataFetcher(object):
     def mergedata(self):
         try:
             self.df = self.flights.merge(self.prices, on=["flightNo"])
+            print(f"合并后的航班数据形状: {self.df.shape}")
+            print(f"合并后的航班数据列: {self.df.columns}")
 
             self.df["dateGetTime"] = dt.now().strftime("%Y-%m-%d")
 
+            print(f"获取到的舒适度数据: {self.comfort_data}")
+            
+            # 数据的列名映射
+            columns = {
+                "dateGetTime": "数据获取日期",
+                "flightNo": "航班号",
+                "marketAirlineName": "航空公司",
+                "departureday": "出发日期",
+                "departuretime": "出发时间",
+                "arrivalday": "到达日期",
+                "arrivaltime": "到达时间",
+                "duration": "飞行时长",
+                "departureCountryName": "出发国家",
+                "departureCityName": "出发城市",
+                "departureAirportName": "出发机场",
+                "departureAirportCode": "出发机场三字码",
+                "arrivalCountryName": "到达国家",
+                "arrivalCityName": "到达城市",
+                "arrivalAirportName": "到达机场",
+                "arrivalAirportCode": "到达机场三字码",
+                "aircraftName": "飞机型号",
+                "aircraftSize": "飞机尺寸",
+                "aircraftCode": "飞机型号三字码",
+                "arrivalPunctuality": "到达准点率",
+                "stopCount": "停留次数",
+                "stopInfo": "中转信息"
+            }
+            
+            # 定义舒适度数据的列名映射
+            comfort_columns = {
+                'departure_delay_time': '出发延误时间',
+                'departure_bridge_rate': '出发廊桥率',
+                'arrival_delay_time': '到达延误时间',
+                'plane_type': '飞机类型',
+                'plane_width': '飞机宽度',
+                'plane_age': '飞机机龄',
+                'Y_has_meal': '经济舱是否有餐食',
+                'Y_seat_tilt': '经济舱座椅倾斜度',
+                'Y_seat_width': '经济舱座椅宽度',
+                'Y_seat_pitch': '经济舱座椅间距',
+                'Y_meal_msg': '经济舱餐食信息',
+                'Y_power': '经济舱电源',
+                'C_has_meal': '商务舱是否有餐食',
+                'C_seat_tilt': '商务舱座椅倾斜度',
+                'C_seat_width': '商务舱座椅宽度',
+                'C_seat_pitch': '商务舱座椅间距',
+                'C_meal_msg': '商务舱餐食信息',
+                'C_power': '商务舱电源',
+            }
+            
+            if self.comfort_data:
+                comfort_df = pd.DataFrame.from_dict(self.comfort_data, orient='index')
+                comfort_df.reset_index(inplace=True)
+                comfort_df.rename(columns={'index': 'flight_no'}, inplace=True)
+                
+                print(f"舒适度数据形状: {comfort_df.shape}")
+                print(f"舒适度数据列: {comfort_df.columns}")
+                print(f"舒适度数据前几行: \n{comfort_df.head()}")
+                
+                # 检查 operateFlightNo 列是否存在
+                if 'operateFlightNo' in self.df.columns:
+                    print(f"合并前的 operateFlightNo 唯一值: {self.df['operateFlightNo'].unique()}")
+                    # 创建一个临时列来存储用于匹配的航班号
+                    self.df['match_flight_no'] = self.df['operateFlightNo'].fillna(self.df['flightNo'])
+                else:
+                    print("警告: operateFlightNo 列不存在于数据中,将使用 flightNo 进行匹配")
+                    self.df['match_flight_no'] = self.df['flightNo']
+                
+                print(f"现有的列: {self.df.columns}")
+                print(f"合并前的 flight_no 唯一值: {comfort_df['flight_no'].unique()}")
+                
+                # 使用 left join 来合并数据
+                self.df = self.df.merge(comfort_df, left_on='match_flight_no', right_on='flight_no', how='left')
+                
+                print(f"合并后的数据形状: {self.df.shape}")
+                print(f"合并后的数据列: {self.df.columns}")
+                
+                # 删除临时列和多余的flight_no列
+                self.df.drop(['match_flight_no', 'flight_no'], axis=1, inplace=True, errors='ignore')
+            else:
+                # 如果没有舒适度数据，手动添加空列，保证数据结构一致性
+                for col in comfort_columns.keys():
+                    self.df[col] = None  # 添加缺失的舒适度列并填充为空值
+
             if rename_col:
+                order = list(columns.values())
                 # 对pandas的columns进行重命名
-                order = [
-                    "数据获取日期",
-                    "航班号",
-                    "航空公司",
-                    "出发日期",
-                    "出发时间",
-                    "到达日期",
-                    "到达时间",
-                    "飞行时长",
-                    "出发国家",
-                    "出发城市",
-                    "出发机场",
-                    "出发机场三字码",
-                    "到达国家",
-                    "到达城市",
-                    "到达机场",
-                    "到达机场三字码",
-                    "飞机型号",
-                    "飞机尺寸",
-                    "飞机型号三字码",
-                    "到达准点率",
-                    "停留次数",
-                ]
-
-                origin = [
-                    "dateGetTime",
-                    "flightNo",
-                    "marketAirlineName",
-                    "departureday",
-                    "departuretime",
-                    "arrivalday",
-                    "arrivaltime",
-                    "duration",
-                    "departureCountryName",
-                    "departureCityName",
-                    "departureAirportName",
-                    "departureAirportCode",
-                    "arrivalCountryName",
-                    "arrivalCityName",
-                    "arrivalAirportName",
-                    "arrivalAirportCode",
-                    "aircraftName",
-                    "aircraftSize",
-                    "aircraftCode",
-                    "arrivalPunctuality",
-                    "stopCount",
-                ]
-
-                columns = dict(zip(origin, order))
+                columns.update(comfort_columns, errors='ignore')
 
                 self.df = self.df.rename(columns=columns)
 
                 if del_info:
-                    self.df = self.df[order]
+                    # 使用 reindex 确保所有列都存在于最终的 DataFrame 中，不存在的列会被自动忽略
+                    self.df = self.df.reindex(columns=order, fill_value=None)
 
             files_dir = os.path.join(
                 os.getcwd(), self.date, dt.now().strftime("%Y-%m-%d")
@@ -1105,9 +1212,144 @@ class DataFetcher(object):
             return 0
 
         except Exception as e:
-            print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 合并数据失败 {str(e).split("Stacktrace:")[0]}')
-
+            print(f"合并数据失败 {str(e)}")
+            print(f"错误类型: {type(e).__name__}")
+            print(f"错误详情: {str(e)}")
+            import traceback
+            print(f"错误堆栈: {traceback.format_exc()}")
             return 0
+
+    def capture_flight_comfort_data(self):
+        try:
+            # 滚动页面到底部以加载所有内容
+            last_height = self.driver.execute_script("return document.body.scrollHeight")
+            while True:
+                # 分步滚动页面
+                for i in range(10):  # 将页面分成10步滚动
+                    scroll_height = last_height * (i + 1) / 3
+                    self.driver.execute_script(f"window.scrollTo(0, {scroll_height});")
+                    time.sleep(0.5)  # 每一小步等待0.5秒
+                
+                # 等待页面加载
+                time.sleep(3)  # 滚动到底部后多等待3秒
+                
+                # 计算新的滚动高度并与最后的滚动高度进行比较
+                new_height = self.driver.execute_script("return document.body.scrollHeight")
+                if new_height == last_height:
+                    break
+                last_height = new_height
+
+            comfort_requests = self.driver.requests
+            comfort_data = {}
+            batch_comfort_found = False
+            getFlightComfort_requests_count = 0
+            total_requests_count = len(comfort_requests)
+
+            print(f"\n{time.strftime('%Y-%m-%d_%H-%M-%S')} 开始分析请求，总请求数：{total_requests_count}")
+
+            for request in comfort_requests:
+                if "/search/api/flight/comfort/batchGetComfortTagList" in request.url:
+                    batch_comfort_found = True
+                    print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} 找到 batchGetComfortTagList 请求")
+                    continue
+                
+                if "/search/api/flight/comfort/getFlightComfort" in request.url:
+                    getFlightComfort_requests_count += 1
+                    print(f"\n{time.strftime('%Y-%m-%d_%H-%M-%S')} 捕获到第 {getFlightComfort_requests_count} 个 getFlightComfort 请求:")
+                    print(f"URL: {request.url}")
+                    
+                    try:
+                        payload = json.loads(request.body.decode('utf-8'))
+                        flight_no = payload.get('flightNoList', ['Unknown'])[0]
+                        print(f"请求的航班号: {flight_no}")
+                    except Exception as e:
+                        print(f"无法解析请求 payload: {str(e)}")
+                        continue
+
+                    if request.response:
+                        print(f"响应状态码: {request.response.status_code}")
+                        body = request.response.body
+                        if request.response.headers.get('Content-Encoding', '').lower() == 'gzip':
+                            body = gzip.decompress(body)
+                        
+                        try:
+                            json_data = json.loads(body.decode('utf-8'))
+                            print(f"响应数据: {json.dumps(json_data, indent=2, ensure_ascii=False)[:500]}...")  # 打印前500个字符
+                            if json_data['status'] == 0 and json_data['msg'] == 'success':
+                                flight_comfort = json_data['data']
+                                
+                                punctuality = flight_comfort['punctualityInfo']
+                                plane_info = flight_comfort['planeInfo']
+                                cabin_info = {cabin['cabin']: cabin for cabin in flight_comfort['cabinInfoList']}
+                                
+                                processed_data = {
+                                    'departure_delay_time': punctuality.get("departureDelaytime", None),
+                                    'departure_bridge_rate': punctuality.get("departureBridge", None),
+                                    'arrival_delay_time': punctuality.get("arrivalDelaytime", None),
+                                    'plane_type': plane_info.get("planeTypeName", None),
+                                    'plane_width': plane_info.get("planeWidthCategory", None),
+                                    'plane_age': plane_info.get("planeAge", None)
+                                }
+                                
+                                for cabin_type in ['Y', 'C']:
+                                    if cabin_type in cabin_info:
+                                        cabin = cabin_info[cabin_type]
+                                        processed_data.update({
+                                            f'{cabin_type}_has_meal': cabin['hasMeal'],
+                                            f'{cabin_type}_seat_tilt': cabin['seatTilt']['value'],
+                                            f'{cabin_type}_seat_width': cabin['seatWidth']['value'],
+                                            f'{cabin_type}_seat_pitch': cabin['seatPitch']['value'],
+                                            f'{cabin_type}_meal_msg': cabin['mealMsg']
+                                        })
+                                        if 'power' in cabin:
+                                            processed_data[f'{cabin_type}_power'] = cabin['power']
+                                
+                                comfort_data[flight_no] = processed_data
+                                print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} 成功提取航班 {flight_no} 的舒适度数据")
+                            else:
+                                print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} getFlightComfort 响应状态异常: {json_data['status']}, {json_data['msg']}")
+                        except Exception as e:
+                            print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} 处理 getFlightComfort 响应时出错: {str(e)}")
+                    else:
+                        print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} getFlightComfort 请求没有响应")
+
+            print(f"\n{time.strftime('%Y-%m-%d_%H-%M-%S')} 请求分析完成")
+            print(f"总请求数: {total_requests_count}")
+            print(f"batchGetComfortTagList 请求是否找到: {batch_comfort_found}")
+            print(f"getFlightComfort 请求数: {getFlightComfort_requests_count}")
+            print(f"成功提取的舒适度数据数: {len(comfort_data)}")
+
+            if comfort_data:
+                # 创建舒适度DataFrame
+                comfort_df = pd.DataFrame.from_dict(comfort_data, orient='index')
+                comfort_df.reset_index(inplace=True)
+                comfort_df.rename(columns={'index': 'flight_no'}, inplace=True)
+                
+                # 保存舒适度数据为CSV文件
+                # save_dir = os.path.join(os.getcwd(), self.date, datetime.now().strftime("%Y-%m-%d"))
+                # os.makedirs(save_dir, exist_ok=True)
+                
+                # comfort_filename = os.path.join(save_dir, f"{self.city[0]}-{self.city[1]}_comfort.csv")
+                # comfort_df.to_csv(comfort_filename, encoding="UTF-8", index=False)
+                # print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} 航班舒适度数据已保存到 {comfort_filename}")
+                
+                return comfort_data
+            else:
+                print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} 未捕获到任何 getFlightComfort 数据")
+                print("可能的原因:")
+                print("1. 网页没有加载完全")
+                print("2. 网站结构可能已经改变")
+                print("3. 网络连接问题")
+                print("4. 请求被网站拦截或限制")
+                return None
+
+        except Exception as e:
+            print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} 捕获 getFlightComfort 数据时出错：{str(e)}")
+            print(f"错误类型: {type(e).__name__}")
+            print(f"错误详情: {str(e)}")
+            import traceback
+            print(f"错误堆栈: {traceback.format_exc()}")
+            return None
 
 
 if __name__ == "__main__":
