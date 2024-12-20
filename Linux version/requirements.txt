@@ -1,0 +1,3 @@
+pandas==2.2.3
+selenium_wire==5.1.0
+python_magic==0.4.27

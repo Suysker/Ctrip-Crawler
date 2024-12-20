@@ -1,0 +1,4 @@
+pandas==2.2.3
+selenium_wire==5.1.0
+python-magic==0.4.27; platform_system != "Windows"
+python-magic-bin==0.4.14; platform_system == "Windows"

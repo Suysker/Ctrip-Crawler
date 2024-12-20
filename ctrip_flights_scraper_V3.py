@@ -4,7 +4,6 @@ import os
 import gzip
 import time
 import json
-import requests
 import pandas as pd
 from seleniumwire import webdriver
 from datetime import datetime as dt, timedelta
@@ -65,21 +64,6 @@ accounts = ['','']
 # 密码
 passwords = ['','']
 
-#利用stealth.min.js隐藏selenium特征
-stealth_js_path='./stealth.min.js'
-
-# 定义下载stealth.min.js的函数
-def download_stealth_js(file_path, url='https://raw.githubusercontent.com/requireCool/stealth.min.js/main/stealth.min.js'):
-    if not os.path.exists(file_path):
-        print(f"{file_path} not found, downloading...")
-        response = requests.get(url)
-        response.raise_for_status()  # 确保请求成功
-        with open(file_path, 'w') as file:
-            file.write(response.text)
-        print(f"{file_path} downloaded.")
-    else:
-        print(f"{file_path} already exists, no need to download.")
-
 def init_driver():
     # options = webdriver.ChromeOptions() # 创建一个配置对象
     options = webdriver.EdgeOptions()  # 创建一个配置对象
@@ -103,16 +87,6 @@ def init_driver():
     # 如果需要指定路径，可以加上executable_path参数
     # driver = webdriver.Chrome(options=options)  
     driver = webdriver.Edge(options=options)
-    
-    try:
-        download_stealth_js(stealth_js_path)
-        # 读取并注入stealth.min.js
-        with open(stealth_js_path, 'r') as file:
-            stealth_js = file.read()
-            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": stealth_js})
-    except Exception as e:
-        print(e)
-    
     driver.maximize_window()
 
     return driver
