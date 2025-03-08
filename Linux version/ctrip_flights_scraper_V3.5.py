@@ -12,6 +12,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+import threading
 
 # 爬取的城市
 crawl_citys = ["上海", "香港", "东京"]
@@ -72,6 +73,10 @@ accounts = ['','']
 
 # 密码
 passwords = ['','']
+
+#本地登录缓存
+COOKIES_FILE = "cookies.json"
+REQUIRED_COOKIES = ["AHeadUserInfo", "DUID", "IsNonUser", "_udl", "cticket", "login_type", "login_uid"]
 
 #切换IP模式
 ip_mode ='normal'
@@ -257,11 +262,57 @@ class DataFetcher(object):
                 f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code:未知错误，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}'
             )
 
+    def load_cookies(self, account):
+        if os.path.exists(COOKIES_FILE):
+            try:
+                with open(COOKIES_FILE, "r") as f:
+                    cookies_all = json.load(f)
+                return cookies_all.get(account)
+            except Exception as e:
+                print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} load_cookies: 读取 cookies 出错：{e}")
+                return None
+        return None
+
+    def save_cookies(self, account, cookies):
+        cookies_all = {}
+        if os.path.exists(COOKIES_FILE):
+            try:
+                with open(COOKIES_FILE, "r") as f:
+                    cookies_all = json.load(f)
+            except Exception:
+                cookies_all = {}
+        cookies_all[account] = cookies
+        with open(COOKIES_FILE, "w") as f:
+            json.dump(cookies_all, f)
+
     def login(self):
         if login_allowed:
             
             account = accounts[self.switch_acc % len(accounts)]
             password = passwords[self.switch_acc % len(passwords)]
+            
+            # ===== 尝试使用本地缓存的 cookies 登录 =====
+            local_cookies = self.load_cookies(account)
+            if local_cookies:
+                print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} login: 检测到本地 cookies，尝试通过 cookies 登录")
+                for cookie in local_cookies:
+                    try:
+                        self.driver.add_cookie(cookie)
+                    except Exception as e:
+                        print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} login: 添加 cookie {cookie.get('name')} 失败：{e}")
+                
+                try:
+                    # 检测登录状态，通过https://my.ctrip.com/myinfo/home
+                    self.driver.get('https://my.ctrip.com/myinfo/home')
+                    
+                    WebDriverWait(self.driver, max_wait_time).until(
+                        EC.presence_of_element_located((By.CLASS_NAME, "myctrip_wrap"))
+                    )
+                    print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} login: 已通过 cookie 登录")
+                    self.err += 99
+                    return 1
+                except Exception:
+                    print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} login: cookie 登录失效，重新走登录流程")
             
             try:
                 if len(self.driver.find_elements(By.CLASS_NAME, "lg_loginbox_modal")) == 0:
@@ -289,9 +340,66 @@ class DataFetcher(object):
                 
                 ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME, "form_btn.form_btn--block")[0]))
                 ele.click()
-                print(
-                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login：登录成功'
-                )
+
+                # 检查是否出现验证码验证页面（max_wait_time秒内检测）
+                try:
+                    WebDriverWait(self.driver, max_wait_time).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid='doubleAuthSwitcherBox']"))
+                    )
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 检测到验证码验证页面')
+                    
+                    # 定义验证码弹窗的父级选择器
+                    double_auth_selector = "[data-testid='doubleAuthSwitcherBox']"
+                    
+                    # 从 doubleAuthSwitcherBox 内定位发送验证码按钮并点击
+                    send_btn = WebDriverWait(self.driver, max_wait_time).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, f"{double_auth_selector} dl[data-testid='dynamicCodeInput'] a.btn-primary-s"))
+                    )
+                    send_btn.click()
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 发送验证码按钮点击')
+                    
+                    # 使用线程等待用户在控制台输入验证码，超时则按超时处理逻辑
+                    verification_code = [None]
+                    user_input_completed = threading.Event()
+                    
+                    def wait_for_verification_input():
+                        verification_code[0] = input("请输入收到的验证码: ")
+                        user_input_completed.set()
+                    
+                    input_thread = threading.Thread(target=wait_for_verification_input)
+                    input_thread.start()
+                    timeout_seconds = crawl_interval * 100
+                    input_thread.join(timeout=timeout_seconds)
+                    
+                    if not user_input_completed.is_set():
+                        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 验证码输入超时 {timeout_seconds} 秒')
+                        self.switch_acc += 1
+                        self.err += 99
+                        return 0
+                    
+                    # 从 doubleAuthSwitcherBox 内定位验证码输入框，并输入验证码
+                    code_input = WebDriverWait(self.driver, max_wait_time).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, f"{double_auth_selector} input[data-testid='verifyCodeInput']"))
+                    )
+                    code_input.send_keys(verification_code)
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 验证码输入成功')
+                    
+                    # 从 doubleAuthSwitcherBox 内定位并点击“验 证”按钮
+                    verify_btn = WebDriverWait(self.driver, max_wait_time).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, f"{double_auth_selector} dl[data-testid='dynamicVerifyButton'] input[type='submit']"))
+                    )
+                    verify_btn.click()
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 验证码提交成功')
+                    
+                    # 等待验证码验证后的页面加载，比如首页的某个关键元素
+                    WebDriverWait(self.driver, max_wait_time).until(
+                        EC.presence_of_element_located((By.CLASS_NAME, "pc_home-jipiao"))
+                    )
+                except Exception as e:
+                    # 如果max_wait_time秒内未检测到验证码页面，则认为是正常登录流程
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 未检测到验证码验证页面，继续执行')
+                
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login：登录成功')
                 # 保存登录截图
                 if enable_screenshot:
                     self.driver.save_screenshot(
@@ -299,7 +407,12 @@ class DataFetcher(object):
                     )
                 time.sleep(crawl_interval*3)
                 
-                self.driver.refresh()
+                # ===== 登录成功后提取需要的 cookies 并保存 =====
+                all_cookies = self.driver.get_cookies()
+                filtered_cookies = [ck for ck in all_cookies if ck.get("name") in REQUIRED_COOKIES]
+                self.save_cookies(account, filtered_cookies)
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: cookies 已保存')
+                
             except Exception as e:
                 # 错误次数+1
                 self.err += 1
@@ -327,7 +440,6 @@ class DataFetcher(object):
                     print(
                         f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,login:重新尝试加载页面，这次指定需要重定向到首页'
                     )
-
     
     def get_page(self, reset_to_homepage=0):
         next_stage_flag = False
