@@ -285,6 +285,19 @@ class DataFetcher(object):
         with open(COOKIES_FILE, "w") as f:
             json.dump(cookies_all, f)
 
+    def delete_cookies(self, account):
+        try:
+            if os.path.exists(COOKIES_FILE):
+                with open(COOKIES_FILE, "r") as f:
+                    cookies_all = json.load(f)
+                if account in cookies_all:
+                    del cookies_all[account]
+                    with open(COOKIES_FILE, "w") as f:
+                        json.dump(cookies_all, f)
+                    print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} login: 成功删除账号 {account} 的 cookies")
+        except Exception as e:
+            print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} login: 删除账号 {account} cookies 失败：{e}")
+
     def login(self):
         if login_allowed:
             
@@ -306,140 +319,146 @@ class DataFetcher(object):
                     self.driver.get('https://my.ctrip.com/myinfo/home')
                     
                     WebDriverWait(self.driver, max_wait_time).until(
-                        EC.presence_of_element_located((By.CLASS_NAME, "myctrip_wrap"))
+                        lambda d: d.current_url == 'https://my.ctrip.com/myinfo/home'
                     )
                     print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} login: 已通过 cookie 登录")
                     self.err += 99
                     return 1
                 except Exception:
-                    print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} login: cookie 登录失效，重新走登录流程")
-            
-            try:
-                if len(self.driver.find_elements(By.CLASS_NAME, "lg_loginbox_modal")) == 0:
-                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:未弹出登录界面')
-                    WebDriverWait(self.driver, max_wait_time).until(EC.presence_of_element_located((By.CLASS_NAME, "tl_nfes_home_header_login_wrapper_siwkn")))
-                    # 点击飞机图标，返回主界面
-                    ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CLASS_NAME, "tl_nfes_home_header_login_wrapper_siwkn")))
-                    ele.click()
-                    #等待页面加载
-                    WebDriverWait(self.driver, max_wait_time).until(EC.presence_of_element_located((By.CLASS_NAME, "lg_loginwrap")))
-                else:
-                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:已经弹出登录界面')
-                
-                ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME, "r_input.bbz-js-iconable-input")[0]))
-                ele.send_keys(account)
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:输入账户成功')
-                
-                ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CSS_SELECTOR, "div[data-testid='accountPanel'] input[data-testid='passwordInput']")))
-                ele.send_keys(password)
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:输入密码成功')
-                
-                ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CSS_SELECTOR, '[for="checkboxAgreementInput"]')))
-                ele.click()
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:勾选同意成功')
-                
-                ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME, "form_btn.form_btn--block")[0]))
-                ele.click()
-
-                # 检查是否出现验证码验证页面（max_wait_time秒内检测）
+                    print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} 错误次数【{self.err}-{max_retry_time}】 login: cookie 登录失效，重新走登录流程")
+                    self.err += 1
+                    if self.err >= max_retry_time:
+                        print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} login: cookie 登录失败次数超过 {max_retry_time} 次，删除该账号 cookies")
+                        self.delete_cookies(account)
+                        self.err = 0
+                    self.login()
+            else:
                 try:
-                    WebDriverWait(self.driver, max_wait_time).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid='doubleAuthSwitcherBox']"))
-                    )
-                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 检测到验证码验证页面')
+                    if len(self.driver.find_elements(By.CLASS_NAME, "lg_loginbox_modal")) == 0:
+                        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:未弹出登录界面')
+                        WebDriverWait(self.driver, max_wait_time).until(EC.presence_of_element_located((By.CLASS_NAME, "tl_nfes_home_header_login_wrapper_siwkn")))
+                        # 点击飞机图标，返回主界面
+                        ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CLASS_NAME, "tl_nfes_home_header_login_wrapper_siwkn")))
+                        ele.click()
+                        #等待页面加载
+                        WebDriverWait(self.driver, max_wait_time).until(EC.presence_of_element_located((By.CLASS_NAME, "lg_loginwrap")))
+                    else:
+                        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:已经弹出登录界面')
                     
-                    # 定义验证码弹窗的父级选择器
-                    double_auth_selector = "[data-testid='doubleAuthSwitcherBox']"
+                    ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME, "r_input.bbz-js-iconable-input")[0]))
+                    ele.send_keys(account)
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:输入账户成功')
                     
-                    # 从 doubleAuthSwitcherBox 内定位发送验证码按钮并点击
-                    send_btn = WebDriverWait(self.driver, max_wait_time).until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, f"{double_auth_selector} dl[data-testid='dynamicCodeInput'] a.btn-primary-s"))
-                    )
-                    send_btn.click()
-                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 发送验证码按钮点击')
+                    ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CSS_SELECTOR, "div[data-testid='accountPanel'] input[data-testid='passwordInput']")))
+                    ele.send_keys(password)
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:输入密码成功')
                     
-                    # 使用线程等待用户在控制台输入验证码，超时则按超时处理逻辑
-                    verification_code = [None]
-                    user_input_completed = threading.Event()
+                    ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_element(By.CSS_SELECTOR, '[for="checkboxAgreementInput"]')))
+                    ele.click()
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:勾选同意成功')
                     
-                    def wait_for_verification_input():
-                        verification_code[0] = input("请输入收到的验证码: ")
-                        user_input_completed.set()
-                    
-                    input_thread = threading.Thread(target=wait_for_verification_input)
-                    input_thread.start()
-                    timeout_seconds = crawl_interval * 100
-                    input_thread.join(timeout=timeout_seconds)
-                    
-                    if not user_input_completed.is_set():
-                        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 验证码输入超时 {timeout_seconds} 秒')
-                        self.switch_acc += 1
-                        self.err += 99
-                        return 0
-                    
-                    # 从 doubleAuthSwitcherBox 内定位验证码输入框，并输入验证码
-                    code_input = WebDriverWait(self.driver, max_wait_time).until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, f"{double_auth_selector} input[data-testid='verifyCodeInput']"))
-                    )
-                    code_input.send_keys(verification_code)
-                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 验证码输入成功')
-                    
-                    # 从 doubleAuthSwitcherBox 内定位并点击“验 证”按钮
-                    verify_btn = WebDriverWait(self.driver, max_wait_time).until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, f"{double_auth_selector} dl[data-testid='dynamicVerifyButton'] input[type='submit']"))
-                    )
-                    verify_btn.click()
-                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 验证码提交成功')
-                    
-                    # 等待验证码验证后的页面加载，比如首页的某个关键元素
-                    WebDriverWait(self.driver, max_wait_time).until(
-                        EC.presence_of_element_located((By.CLASS_NAME, "pc_home-jipiao"))
-                    )
-                except Exception as e:
-                    # 如果max_wait_time秒内未检测到验证码页面，则认为是正常登录流程
-                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 未检测到验证码验证页面，继续执行')
-                
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login：登录成功')
-                # 保存登录截图
-                if enable_screenshot:
-                    self.driver.save_screenshot(
-                        f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png'
-                    )
-                time.sleep(crawl_interval*3)
-                
-                # ===== 登录成功后提取需要的 cookies 并保存 =====
-                all_cookies = self.driver.get_cookies()
-                filtered_cookies = [ck for ck in all_cookies if ck.get("name") in REQUIRED_COOKIES]
-                self.save_cookies(account, filtered_cookies)
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: cookies 已保存')
-                
-            except Exception as e:
-                # 错误次数+1
-                self.err += 1
-                # 用f字符串格式化错误类型和错误信息，提供更多的调试信息
-                print(
-                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login：页面加载或元素操作失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}'
-                )
+                    ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME, "form_btn.form_btn--block")[0]))
+                    ele.click()
     
-                # 保存错误截图
-                if enable_screenshot:
-                    self.driver.save_screenshot(
-                        f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png'
-                    )
+                    # 检查是否出现验证码验证页面（max_wait_time秒内检测）
+                    try:
+                        WebDriverWait(self.driver, max_wait_time).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid='doubleAuthSwitcherBox']"))
+                        )
+                        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 检测到验证码验证页面')
+                        
+                        # 定义验证码弹窗的父级选择器
+                        double_auth_selector = "[data-testid='doubleAuthSwitcherBox']"
+                        
+                        # 从 doubleAuthSwitcherBox 内定位发送验证码按钮并点击
+                        send_btn = WebDriverWait(self.driver, max_wait_time).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, f"{double_auth_selector} dl[data-testid='dynamicCodeInput'] a.btn-primary-s"))
+                        )
+                        send_btn.click()
+                        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 发送验证码按钮点击')
+                        
+                        # 使用线程等待用户在控制台输入验证码，超时则按超时处理逻辑
+                        verification_code = [None]
+                        user_input_completed = threading.Event()
+                        
+                        def wait_for_verification_input():
+                            verification_code[0] = input("请输入收到的验证码: ")
+                            user_input_completed.set()
+                        
+                        input_thread = threading.Thread(target=wait_for_verification_input)
+                        input_thread.start()
+                        timeout_seconds = crawl_interval * 100
+                        input_thread.join(timeout=timeout_seconds)
+                        
+                        if not user_input_completed.is_set():
+                            print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 验证码输入超时 {timeout_seconds} 秒')
+                            self.switch_acc += 1
+                            self.err += 99
+                            return 0
+                        
+                        # 从 doubleAuthSwitcherBox 内定位验证码输入框，并输入验证码
+                        code_input = WebDriverWait(self.driver, max_wait_time).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, f"{double_auth_selector} input[data-testid='verifyCodeInput']"))
+                        )
+                        code_input.send_keys(verification_code)
+                        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 验证码输入成功')
+                        
+                        # 从 doubleAuthSwitcherBox 内定位并点击“验 证”按钮
+                        verify_btn = WebDriverWait(self.driver, max_wait_time).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, f"{double_auth_selector} dl[data-testid='dynamicVerifyButton'] input[type='submit']"))
+                        )
+                        verify_btn.click()
+                        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 验证码提交成功')
+                        
+                        # 等待验证码验证后的页面加载，比如首页的某个关键元素
+                        WebDriverWait(self.driver, max_wait_time).until(
+                            EC.presence_of_element_located((By.CLASS_NAME, "pc_home-jipiao"))
+                        )
+                    except Exception as e:
+                        # 如果max_wait_time秒内未检测到验证码页面，则认为是正常登录流程
+                        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 未检测到验证码验证页面，继续执行')
                     
-                if self.err < max_retry_time:
-                    # 刷新页面
-                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login：刷新页面')
-                    self.refresh_driver()
-                    # 检查注意事项和验证码
-                    if self.check_verification_code():
-                        # 重试
-                        self.login()
-                # 判断错误次数
-                if self.err >= max_retry_time:
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login：登录成功')
+                    # 保存登录截图
+                    if enable_screenshot:
+                        self.driver.save_screenshot(
+                            f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png'
+                        )
+                    time.sleep(crawl_interval*3)
+                    
+                    # ===== 登录成功后提取需要的 cookies 并保存 =====
+                    all_cookies = self.driver.get_cookies()
+                    filtered_cookies = [ck for ck in all_cookies if ck.get("name") in REQUIRED_COOKIES]
+                    self.save_cookies(account, filtered_cookies)
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: cookies 已保存')
+                    
+                except Exception as e:
+                    # 错误次数+1
+                    self.err += 1
+                    # 用f字符串格式化错误类型和错误信息，提供更多的调试信息
                     print(
-                        f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,login:重新尝试加载页面，这次指定需要重定向到首页'
+                        f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login：页面加载或元素操作失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}'
                     )
+        
+                    # 保存错误截图
+                    if enable_screenshot:
+                        self.driver.save_screenshot(
+                            f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png'
+                        )
+                        
+                    if self.err < max_retry_time:
+                        # 刷新页面
+                        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login：刷新页面')
+                        self.refresh_driver()
+                        # 检查注意事项和验证码
+                        if self.check_verification_code():
+                            # 重试
+                            self.login()
+                    # 判断错误次数
+                    if self.err >= max_retry_time:
+                        print(
+                            f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,login:重新尝试加载页面，这次指定需要重定向到首页'
+                        )
     
     def get_page(self, reset_to_homepage=0):
         next_stage_flag = False
