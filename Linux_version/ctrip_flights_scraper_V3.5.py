@@ -116,13 +116,14 @@ def init_driver():
         "excludeSwitches", ["enable-automation"]
     )  # 不显示正在受自动化软件控制的提示
     # options.page_load_strategy = 'eager'  # DOMContentLoaded事件触发即可
+    if enable_proxy:
+        options.add_argument("--proxy-server=socks5://127.0.0.1:1080")
     driver = webdriver.Chrome(options=options)
     driver.set_page_load_timeout(max_wait_time*max_retry_time)  # 设置加载超时阈值
     # driver.maximize_window()
     driver.set_window_size(1280, 480)
 
     return driver
-
 
 def gen_citys(crawl_citys):
     # 生成城市组合列表
@@ -184,6 +185,7 @@ class DataFetcher(object):
         self.city = None
         self.err = 0  # 错误重试次数
         self.switch_acc = 0 #切换账户
+        self.comfort_data = None  # 航班舒适度信息
 
     def refresh_driver(self):
         try:
@@ -248,7 +250,7 @@ class DataFetcher(object):
                 self.err = 0
                 # 更换IPV6地址
                 if enable_proxy:
-                    gen_proxy_servers.switch_proxy_server(ip_mode)
+                    gen_proxy_servers.switch_proxy_server()
                 self.switch_acc += 1
                 self.get_page(1)
                 return False
@@ -1472,9 +1474,18 @@ if __name__ == "__main__":
     kill_driver()
 
     if enable_proxy:
-        gen_proxy_servers.start_proxy_servers(
-            ipv6_count, ip_mode, base_interface, delete_interface
-        )
+        # 启动随机模式代理，创建 10 个接口，并删除已有接口
+        proxy_thread = threading.Thread(target=lambda: gen_proxy_servers.run_proxy(
+            mode=ip_mode,
+            port=1080,
+            bind_address="0.0.0.0",
+            base_interface=base_interface,
+            num_interfaces=ipv6_count,
+            delete_iface=delete_interface
+        ), daemon=True)
+        proxy_thread.start()
+        print("随机模式 SOCKS5 代理服务已启动。")
+        time.sleep(5)  # 等待代理服务完全启动
 
     driver = init_driver()
 
@@ -1505,7 +1516,7 @@ if __name__ == "__main__":
 
             # 更换IPV6地址
             if enable_proxy:
-                gen_proxy_servers.switch_proxy_server(ip_mode)
+                gen_proxy_servers.switch_proxy_server()
 
             time.sleep(crawl_interval)
 
@@ -1515,8 +1526,5 @@ if __name__ == "__main__":
         driver.quit()
     except Exception as e:
         print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} An error occurred while quitting the driver: {e}')
-
-    if enable_proxy:
-        gen_proxy_servers.stop_proxy_servers(base_interface, delete_interface)
 
     print(f'\n{time.strftime("%Y-%m-%d_%H-%M-%S")} 程序运行完成！！！！')
