@@ -280,7 +280,7 @@ flowchart TD
 
 当 `rename_col=True` 且 `del_info=True`，输出列序先从基础映射取出，再补入舒适度映射，最后按先前基础列序裁剪，因此票价及舒适度列可能被排除。`columns.update(comfort_columns, errors='ignore')` 是字典更新，会额外加入名为 `errors` 的映射，并不是 pandas 的忽略错误选项。
 
-V3 时期的 CSV 转 Excel 脚本是独立后处理工具，按固定列名筛选数据，不被爬虫调用。根目录的当前转换工具已改为保留输入列的并集，使用方式见 [项目使用说明](../../../README.md#转换为-excel)。
+V3 时期的 CSV 转 Excel 脚本是独立后处理工具，按固定列名筛选数据，不被爬虫调用。根目录的当前转换工具已改为保留输入列的并集，使用方式见 [使用指南](../../guides/GUI-002-usage.md#转换为-excel)。
 
 ## 8. Linux IPv6 代理架构
 
