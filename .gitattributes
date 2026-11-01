@@ -1,0 +1,2 @@
+# Keep the generated distribution byte-identical across platform checkouts.
+/ctrip_flights_scraper.py text eol=lf

@@ -1,3 +1,9 @@
+# Linux 代理原说明
+
+用途：保留原 Linux 代理使用说明，并指向归档位置与源码分析。
+
+> **历史版本说明**：本目录保存 V3.5、配套代理源码及依赖文件。下方为原说明，含过时表述：实际切换函数为 `switch_proxy_server()`，清理不只针对程序创建的接口，也不能保证异常退出后的完整清理。下方相对路径命令以本目录为工作目录；接口与运行约束以 [CON-001 历史实现分析](../../docs/archive/legacy-reference/CON-001-v3-v35-architecture.md) 为准。当前单文件版本的使用方法见 [项目使用说明](../../README.md)。
+
 ## 模块简介
 
 `gen_proxy_servers.py` 是一个基于 Python 的 asyncio 实现的 SOCKS5 代理服务模块，专门用于在多个 macvlan 接口上切换出站 IPv6 地址。
