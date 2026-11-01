@@ -1,7 +1,7 @@
 # V4 架构与运行合同：Camoufox、独立单文件与长任务恢复
 
 > ID: CON-002 · Status: Current
-> Created: 2026-11-01 · Updated: 2026-11-01
+> Created: 2026-11-01 · Updated: 2026-11-02
 > Purpose: 说明 V4 的单文件架构、父子进程协议、账号池、采集与文件恢复规则，以及可复现的验证标准。
 
 ## 1. 架构概览
@@ -259,6 +259,8 @@ TaskKey 根据规范化城市代码、出发日与结果相关选项产生稳定
 子进程使用 AsyncCamoufox。明确指定已经安装的精确浏览器构建，禁止跟随运行机器的活动版本无声漂移。官方 Python 接口支持异步使用、指定构建、显式指纹 preset 字典和持久上下文。[Camoufox 用法](https://camoufox.com/python/usage/)。
 
 采用可关闭重建的非持久 BrowserContext，持久化的是显式认证快照和指纹描述，而不是把任务状态塞进浏览器用户目录。浏览器内部缓存实现不属于应用数据存储设计。
+
+`BrowserSession.start()` 在 `browser.new_context()` 上设置 `ignore_https_errors=True`。项目的登录、城市解析和采集页面均使用该上下文，HTTPS 证书错误不会阻止页面访问；该策略适用于整个上下文，不是单个站点或指定 CA 的白名单。仅放宽项目上下文的证书校验，不更改系统信任库，不使用 Chromium 启动参数，也不影响其他上下文的校验策略。会话恢复仍通过原有 storage_state 参数完成，浏览器重建时重新应用同一上下文策略。
 
 ### 7.2 每个账号一个确定的会话身份
 

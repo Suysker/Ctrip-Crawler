@@ -1,7 +1,7 @@
 # 使用指南
 
 > ID: GUI-002 · Status: Current
-> Created: 2026-11-01 · Updated: 2026-11-01
+> Created: 2026-11-01 · Updated: 2026-11-02
 > Purpose: 介绍当前单文件采集器的安装、配置、登录、恢复及 Excel 转换方法。
 
 ## 安装
@@ -35,6 +35,12 @@ python ctrip_flights_scraper.py --check-environment
 ```bash
 python ctrip_flights_scraper.py --help
 ```
+
+### HTTPS 证书
+
+项目创建的浏览器上下文启用 `ignore_https_errors=True`，可访问因自签名证书或颁发机构不受信任而被浏览器拒绝的 HTTPS 页面。这适用于云环境代理使用自定义证书、浏览器信任库与环境不一致等情况。
+
+该设置适用于项目上下文中的所有页面，包括登录与采集页面，并非只接受某一张证书。连接仍使用 HTTPS，但浏览器会忽略证书校验错误。程序不导入 CA、不修改系统信任库，也不改变其他浏览器上下文的设置；代理连接失败、登录验证及站点限流仍按各自规则处理。
 
 ## 采集设置
 

@@ -28,6 +28,8 @@ python -c "from camoufox.fpgen_model import ensure_fpgen_model; ensure_fpgen_mod
 
 这一步用于安装依赖、浏览器和指纹模型，只需准备一次。单文件用户可参考[单独安装说明](docs/guides/GUI-002-usage.md#单独下载脚本)。
 
+项目浏览器会忽略 HTTPS 证书错误，作用范围见 [HTTPS 证书说明](docs/guides/GUI-002-usage.md#https-证书)。
+
 ### 2. 填写账号和航线
 
 打开 `ctrip_flights_scraper.py`，在顶部 `DEFAULT_CONFIG` 中修改这些项目，其余先保持默认：

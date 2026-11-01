@@ -1442,7 +1442,8 @@ class BrowserSession:
         self.manager = AsyncCamoufox(from_options=identity_launch_options(self.identity, self.config))
         try:
             self.browser = await self.manager.__aenter__()
-            options = {"locale": "zh-CN", "timezone_id": "Asia/Shanghai", "no_viewport": True}
+            options = {"locale": "zh-CN", "timezone_id": "Asia/Shanghai", "no_viewport": True,
+                       "ignore_https_errors": True}
             if self.state.get("storage_state"):
                 options["storage_state"] = self.state["storage_state"]
             self.context = await self.browser.new_context(**options)

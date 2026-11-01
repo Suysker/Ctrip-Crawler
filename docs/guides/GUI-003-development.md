@@ -1,7 +1,7 @@
 # 开发与验证指南
 
 > ID: GUI-003 · Status: Current
-> Created: 2026-11-01 · Updated: 2026-11-01
+> Created: 2026-11-01 · Updated: 2026-11-02
 > Purpose: 说明维护源码、生成独立单文件和运行自动化验证的方法。
 
 ## 维护源码与分发文件
@@ -40,6 +40,8 @@ CTRIP_BROWSER_TESTS=1 python -m pytest tests -q
 ```
 
 这些检查覆盖数据转换、账号状态、受控页面交互、进程监督和文件中断恢复。真实站点的响应与登录行为可能变化，受控测试不能替代必要的真实业务核对。验证范围与故障矩阵见 [验证标准](../concepts/CON-002-v4-design.md#16-验证方法与可靠性标准)。
+
+`tests/test_browser_tls.py` 使用临时自签名证书和本机 HTTPS 服务，验证项目上下文可访问该服务，而同一浏览器的严格校验上下文仍拒绝它。此检查还需要 OpenSSL：将 `openssl` 加入 PATH，或将 `CTRIP_TEST_OPENSSL` 设置为可执行文件路径；缺少时该项会明确跳过。证书和密钥只生成在测试临时目录，不写入系统信任库，不提交到仓库。
 
 ## 独立单文件验证
 
