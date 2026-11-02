@@ -1,3 +1,12 @@
+class ProjectLogFormatter(logging.Formatter):
+    def __init__(self, timezone_name):
+        super().__init__('%(asctime)s %(levelname)s %(message)s')
+        self.zone = ZoneInfo(timezone_name)
+
+    def formatTime(self, record, datefmt=None):
+        return datetime.fromtimestamp(record.created, self.zone).isoformat(timespec='milliseconds')
+
+
 class Runner:
     """Sequential parent control flow; all durable changes have one owner."""
 
@@ -18,6 +27,83 @@ class Runner:
 
     def save(self):
         atomic_json(self.control_path, self.control)
+
+    def _record_failure(self, error, stage, task_index=None):
+        current = self.control.get('current') or {}
+        diagnostic = make_diagnostic(error, stage=stage, config=self.config)
+        self.control['last_error'] = {
+            'code': error.code, 'task_index': task_index if task_index is not None else current.get('index'),
+            'at': utc_now(), 'attempt_id': current.get('attempt_id'),
+            'worker_generation': self.generation, 'diagnostic': diagnostic,
+        }
+        self.save()
+        self.logger.warning('operation_failed index=%s attempt=%s code=%s diagnostic=%s',
+            self.control['last_error']['task_index'], current.get('attempt_count'), error.code,
+            json.dumps(diagnostic, ensure_ascii=False, separators=(',', ':')))
+
+    def _task_budget(self):
+        current = self.control.get('current') or {}
+        extra = current.get('extra_work_budget', 0.0)
+        if (isinstance(extra, bool) or not isinstance(extra, (int, float))
+                or not math.isfinite(extra) or extra < 0):
+            raise CrawlerError('state_invalid', '人工追加的任务预算无效')
+        total = self.config['task_budget'] + extra
+        if not math.isfinite(total):
+            raise CrawlerError('state_invalid', '任务累计预算超出有效范围')
+        return total
+
+    def _grant_manual_retry(self, token, reason):
+        match = re.fullmatch(r'([0-9]+):([0-9]+)', token) if isinstance(token, str) else None
+        if (match is None or not isinstance(reason, str) or not reason.strip() or len(reason) > 256):
+            raise CrawlerError('config_invalid', '人工恢复需要 TASK:ATTEMPT 和不超过256字符的非空原因')
+        try:
+            index, count = map(int, match.groups())
+        except ValueError as error:
+            raise CrawlerError('config_invalid', '人工恢复任务标识无效') from error
+        token = f'{index}:{count}'
+        current = self.control.get('current')
+        if (not isinstance(current, dict) or type(self.control.get('cursor')) is not int
+                or type(current.get('index')) is not int
+                or self.control['cursor'] != index or current['index'] != index
+                or type(current.get('attempt_count')) is not int or current['attempt_count'] != count):
+            raise CrawlerError('state_invalid', '人工恢复标识与当前任务及尝试次数不符')
+        if self.control.get('staging') is not None or self.control.get('publish_intent') is not None:
+            raise CrawlerError('state_invalid', '必须先恢复未完成的结果发布，不能同时追加任务额度')
+        maximum, used = current.get('max_attempts'), current.get('work_used')
+        if (type(maximum) is not int or maximum < 1 or count < 0
+                or isinstance(used, bool) or not isinstance(used, (int, float))
+                or not math.isfinite(used) or used < 0):
+            raise CrawlerError('state_invalid', '当前任务预算记录无效')
+        records = current.get('manual_recoveries', [])
+        if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
+            raise CrawlerError('state_invalid', '人工恢复记录格式无效')
+        if any(record.get('token') == token for record in records):
+            return False
+        budget = self._task_budget()
+        if count < maximum and used < budget:
+            raise CrawlerError('state_invalid', '当前任务仍有自动恢复额度，不能提前追加')
+        new_budget = budget + self.config['task_budget']
+        if not math.isfinite(new_budget):
+            raise CrawlerError('state_invalid', '人工追加后的累计预算超出有效范围')
+        new_maximum = maximum + max(3, len(self.config['accounts']) or 1)
+        auth = self.control.get('auth')
+        record = {'token': token, 'at': utc_now(), 'reason': safe_message(reason, config=self.config)[:256],
+                  'attempt_count': count, 'work_used': used,
+                  'auth_used': auth.get('used') if isinstance(auth, dict) else current.get('auth_used'),
+                  'old_max_attempts': maximum, 'new_max_attempts': new_maximum,
+                  'old_task_budget': budget, 'new_task_budget': new_budget}
+        candidate = copy.deepcopy(self.control)
+        candidate['current'].update(max_attempts=new_maximum,
+            extra_work_budget=current.get('extra_work_budget', 0.0) + self.config['task_budget'],
+            manual_recoveries=copy.deepcopy(records) + [record])
+        previous = self.control
+        self.control = candidate
+        try:
+            self.save()
+        except BaseException:
+            self.control = previous
+            raise
+        return True
 
     def _check_stop(self):
         if self.stop_requested:
@@ -209,7 +295,7 @@ class Runner:
                     if parse_utc(candidate['saved_at']) > parse_utc(saved.get('updated_at', '0001-01-01T00:00:00+00:00')):
                         state = candidate['state']
             current = self.control.get('current')
-            remaining = self.config['task_budget'] - current['work_used'] if current else self.config['startup_timeout'] * 3 - startup['used']
+            remaining = self._task_budget() - current['work_used'] if current else self.config['startup_timeout'] * 3 - startup['used']
             if remaining <= 0:
                 raise CrawlerError('task_exhausted', '浏览器恢复时间预算已耗尽')
             timeout = min(self.config['startup_timeout'], remaining)
@@ -245,10 +331,10 @@ class Runner:
                 if current:
                     current['work_used'] += elapsed
                 self.save()
+                self._record_failure(exc, 'worker.start')
                 self._close_worker()
                 if exc.code not in ('worker_timeout', 'worker_crashed', 'ipc_closed', 'browser_startup'):
                     raise
-                self.logger.warning('worker_start_failed generation=%s code=%s', self.generation, exc.code)
         raise CrawlerError('worker_startup_exhausted', '浏览器启动次数已耗尽，进度已保存')
 
     def _mark_account(self, state, reason, *, seconds=None):
@@ -307,6 +393,7 @@ class Runner:
             else:
                 self.pool.mark(self.alias, 'ready', 'authenticated', control_path=self.control_path, control=self.control)
         except CrawlerError as exc:
+            self._record_failure(exc, 'auth')
             if exc.code == 'rate_limited':
                 self._handle_site_limit(exc, allow_wait=False)
             elif exc.code in ('credentials_invalid', 'account_disabled'):
@@ -343,11 +430,22 @@ class Runner:
         if resume:
             self.control = read_json(self.control_path)
             saved_config = self.control.get('config')
-            runtime_overrides = {'headless', 'challenge_policy'}
+            runtime_overrides = {'headless', 'challenge_policy', 'proxy_id', 'proxy_identity_version'}
+            current_config = public_config(self.config)
+            if (isinstance(saved_config, dict) and 'comfort_timeout' not in saved_config
+                    and current_config.get('comfort_timeout') == 15.0):
+                current_config.pop('comfort_timeout')
             if (not isinstance(saved_config, dict)
                     or {key: value for key, value in saved_config.items() if key not in runtime_overrides}
-                    != {key: value for key, value in public_config(self.config).items() if key not in runtime_overrides}):
+                    != {key: value for key, value in current_config.items() if key not in runtime_overrides}):
                 raise CrawlerError('config_invalid', '初始化恢复配置与固定配置不同')
+            binding = validate_proxy_binding(saved_config, self.config['proxy'],
+                self.control.get('proxy_binding_override'),
+                refresh=getattr(self, 'refresh_proxy_credentials', False),
+                reason=getattr(self, 'recovery_reason', None))
+            if binding != self.control.get('proxy_binding_override'):
+                self.control['proxy_binding_override'] = binding
+                self.save()
         else:
             self.control = {'schema_version': SCHEMA_VERSION, 'run_id': run_id,
                 'operation_id': uuid.uuid4().hex, 'config': public_config(self.config),
@@ -392,6 +490,7 @@ class Runner:
                 self.control['resolve_used'] += min(timeout, time.monotonic() - began)
                 self.control['resolve_reserved'] = 0
                 self.save()
+                self._record_failure(exc, 'resolve')
                 if exc.code == 'rate_limited':
                     self._handle_site_limit(exc)
                     continue
@@ -428,12 +527,18 @@ class Runner:
         aliases = [a['alias'] for a in self.config['accounts']]
         if aliases != saved_config.get('account_aliases', []):
             raise CrawlerError('config_invalid', '恢复时账号池别名顺序不能改变')
-        if (stable_hash(self.config['proxy']) if self.config['proxy'] else None) != saved_config.get('proxy_id'):
-            raise CrawlerError('config_invalid', '恢复时代理配置不能静默改变')
+        binding = validate_proxy_binding(saved_config, self.config['proxy'],
+            self.control.get('proxy_binding_override'),
+            refresh=getattr(self, 'refresh_proxy_credentials', False),
+            reason=getattr(self, 'recovery_reason', None))
+        if binding != self.control.get('proxy_binding_override'):
+            self.control['proxy_binding_override'] = binding
+            self.save()
         runtime_overrides = {'headless', 'challenge_policy'}
         for key, value in saved_config.items():
             if key in self.config and key not in runtime_overrides:
                 self.config[key] = value
+        self.config['comfort_timeout'] = saved_config.get('comfort_timeout', 15.0)
         self.pool.reconcile(control=self.control, control_path=self.control_path)
         self.store.recover(self.control)
         self._recover_budgets()
@@ -455,6 +560,10 @@ class Runner:
             self.control['status'] = 'completed'
             self.save()
             return 0
+        self.control['status'] = 'running'
+        self.control.pop('pause_reason', None)
+        self.control.pop('pause_diagnostic', None)
+        self.save()
         self._site_gate()
         for task in iter_tasks(plan):
             if task['index'] < self.control['cursor']:
@@ -472,14 +581,14 @@ class Runner:
             while True:
                 self._check_stop()
                 current = self.control['current']
-                if current['attempt_count'] >= current['max_attempts'] or current['work_used'] >= self.config['task_budget']:
+                if current['attempt_count'] >= current['max_attempts'] or current['work_used'] >= self._task_budget():
                     raise CrawlerError('task_exhausted', '当前任务预算已耗尽；resume 不会重置预算')
                 self._wait_until(self.control.get('next_attempt_at'))
                 self._prepare_account()
                 self._wait_until(self.control.get('next_search_at'))
                 self._site_gate()
                 current = reserve_attempt(self.control, self.alias, self.generation,
-                                          self.config['attempt_timeout'], self.config['task_budget'])
+                                          self.config['attempt_timeout'], self._task_budget())
                 self.control['next_search_at'] = (datetime.now(timezone.utc) + timedelta(seconds=self.config['crawl_interval'])).isoformat()
                 self.save()
                 began = time.monotonic()
@@ -504,10 +613,7 @@ class Runner:
                             or self.control.get('staging') or self.control.get('publish_intent')):
                         raise
                     settle_attempt(self.control, time.monotonic() - began)
-                    self.control['last_error'] = {'code': exc.code, 'task_index': task['index'], 'at': utc_now()}
-                    self.save()
-                    self.logger.warning('task_failed index=%s attempt=%s code=%s', task['index'],
-                                        self.control['current']['attempt_count'], exc.code)
+                    self._record_failure(exc, 'collect', task['index'])
                     if exc.code in ('needs_auth', 'challenge') and self.alias is not None:
                         if self.config['challenge_policy'] == 'wait_then_switch':
                             try:
@@ -531,6 +637,8 @@ class Runner:
                         raise
                     self._close_worker()
                     count = self.control['current']['attempt_count']
+                    if count >= self.control['current']['max_attempts'] or self.control['current']['work_used'] >= self._task_budget():
+                        continue
                     delays = self.config.get('retry_delays', [5, 15])
                     delay = delays[min(count - 1, len(delays) - 1)]
                     self.control['current']['work_used'] += delay
@@ -540,7 +648,17 @@ class Runner:
         self.save()
         return 0
 
-    def run(self, *, resume=None, login=None):
+    def run(self, *, resume=None, login=None, retry_current=None,
+            refresh_proxy_credentials=False, recovery_reason=None):
+        action = retry_current is not None or refresh_proxy_credentials
+        if action and (not resume or login is not None):
+            raise CrawlerError('config_invalid', '人工恢复选项只能配合 --resume 使用')
+        if action and (not isinstance(recovery_reason, str) or not recovery_reason.strip() or len(recovery_reason) > 256):
+            raise CrawlerError('config_invalid', '人工恢复必须提供不超过256字符的 --recovery-reason')
+        if recovery_reason is not None and not action:
+            raise CrawlerError('config_invalid', '恢复原因必须对应一个明确的人工恢复操作')
+        self.refresh_proxy_credentials = refresh_proxy_credentials
+        self.recovery_reason = safe_message(recovery_reason, config=self.config)[:256] if action else None
         from filelock import FileLock, Timeout
         self.output.mkdir(parents=True, exist_ok=True)
         try:
@@ -571,12 +689,22 @@ class Runner:
                     run_id = resume or datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ_') + uuid.uuid4().hex[:8]
                     self.logger.info('run=%s output=%s', run_id, self.output)
                     plan = self._resume(run_id) if resume else self._initialize(run_id)
+                    if retry_current is not None:
+                        granted = self._grant_manual_retry(retry_current, self.recovery_reason)
+                        self.logger.warning('manual_retry token=%s granted=%s reason=%s',
+                            retry_current, granted, self.recovery_reason)
                     return self._collect_plan(plan)
                 except BaseException as exc:
                     if self.control_path and self.control_path.exists():
                         self.control['status'] = 'interrupted' if isinstance(exc, KeyboardInterrupt) else 'paused'
                         self.control['pause_reason'] = getattr(exc, 'code', type(exc).__name__)
+                        self.control['pause_diagnostic'] = make_diagnostic(exc, stage='parent.run', config=self.config)
                         self.save()
+                        current = self.control.get('current') or {}
+                        self.logger.warning('run_paused code=%s index=%s attempts=%s/%s work_used=%s/%s diagnostic=%s',
+                            self.control['pause_reason'], current.get('index'), current.get('attempt_count'),
+                            current.get('max_attempts'), current.get('work_used'), self._task_budget(),
+                            json.dumps(self.control['pause_diagnostic'], ensure_ascii=False, separators=(',', ':')))
                     raise
                 finally:
                     self._close_worker()
@@ -620,6 +748,7 @@ def _resume_cli_config(config, run_id, output):
         if key in config and key not in ('accounts', 'proxy', 'output'):
             config[key] = copy.deepcopy(value)
     config['accounts'] = accounts
+    config['comfort_timeout'] = frozen.get('comfort_timeout', 15.0)
     return config
 
 
@@ -630,6 +759,11 @@ def command_line(argv=None):
     operation.add_argument('--resume', metavar='RUN_ID')
     operation.add_argument('--login', metavar='ALIAS')
     operation.add_argument('--check-environment', action='store_true')
+    parser.add_argument('--retry-current', metavar='TASK:ATTEMPT',
+                        help='随 --resume 为已耗尽的指定当前任务追加一轮有限额度')
+    parser.add_argument('--refresh-proxy-credentials', action='store_true',
+                        help='随 --resume 显式迁移旧批次代理凭据绑定；须确认连接配置未变')
+    parser.add_argument('--recovery-reason', metavar='TEXT', help='人工恢复原因，必填且不超过256字符')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--cities', nargs='+', metavar='CITY')
     parser.add_argument('--begin-date')
@@ -677,7 +811,7 @@ def command_line(argv=None):
     output.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger('ctrip')
     logger.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    formatter = ProjectLogFormatter(config['timezone'])
     console = logging.StreamHandler()
     console.setFormatter(formatter)
     rotating = logging.handlers.RotatingFileHandler(output / 'crawler.log', maxBytes=10 * 1024 * 1024,
@@ -698,7 +832,9 @@ def command_line(argv=None):
 
     previous = signal.signal(signal.SIGINT, stop)
     try:
-        result = runner.run(resume=args.resume, login=args.login)
+        result = runner.run(resume=args.resume, login=args.login, retry_current=args.retry_current,
+                            refresh_proxy_credentials=args.refresh_proxy_credentials,
+                            recovery_reason=args.recovery_reason)
         logger.info('finished status=%s stats=%s', result, runner.control.get('stats', {}))
         return result
     finally:
@@ -724,7 +860,9 @@ def main(argv=None):
             return 4
         return 1
     except Exception as exc:
-        print('unexpected_error: ' + type(exc).__name__, file=sys.stderr)
+        diagnostic = make_diagnostic(exc, stage='cli', config=DEFAULT_CONFIG)
+        print('unexpected_error: ' + json.dumps(diagnostic, ensure_ascii=False, separators=(',', ':')),
+              file=sys.stderr)
         return 4
 
 

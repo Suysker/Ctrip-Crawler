@@ -20,6 +20,7 @@ DEFAULT_CONFIG = {
     'action_timeout': 10.0,
     'navigation_timeout': 30.0,
     'attempt_timeout': 90.0,
+    'comfort_timeout': 15.0,
     'task_budget': 300.0,
     'auth_budget': 600.0,
     'login_timeout': 60.0,
@@ -97,10 +98,10 @@ def validate_config(config):
         raise CrawlerError('config_invalid', '请在顶部 accounts 配置账号池，或明确使用 --anonymous')
     if not config['login_allowed'] and enabled:
         raise CrawlerError('config_invalid', '匿名模式不能同时配置启用账号')
-    nonnegative_times = {'crawl_interval', 'cooldown_seconds'}
+    nonnegative_times = {'crawl_interval', 'cooldown_seconds', 'comfort_timeout'}
     for key in ('attempt_timeout', 'task_budget', 'auth_budget', 'startup_timeout', 'close_timeout',
                 'action_timeout', 'navigation_timeout', 'login_timeout', 'challenge_timeout',
-                'standalone_auth_timeout', 'crawl_interval', 'cooldown_seconds'):
+                'standalone_auth_timeout', 'crawl_interval', 'cooldown_seconds', 'comfort_timeout'):
         value = config[key]
         if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
                 or (value < 0 if key in nonnegative_times else value <= 0)):
@@ -115,6 +116,8 @@ def validate_config(config):
             if not isinstance(proxy, dict) or not isinstance(proxy.get('server'), str):
                 raise ValueError('proxy')
             parsed = urlparse(proxy['server'])
+            if parsed.username is not None or parsed.password is not None:
+                raise CrawlerError('config_invalid', '代理凭据必须放在独立的 username/password 字段中')
             if (parsed.scheme not in ('http', 'https', 'socks5') or not parsed.hostname
                     or any(character.isspace() for character in parsed.hostname)
                     or (parsed.port is not None and not 1 <= parsed.port <= 65535)):
@@ -125,11 +128,63 @@ def validate_config(config):
     return config
 
 
+def proxy_identity(proxy):
+    """Bind connection settings; authentication material may be refreshed."""
+    if proxy is None:
+        return None
+    return stable_hash({key: value for key, value in proxy.items()
+                        if key not in ('username', 'password')})
+
+
+def validate_proxy_binding(saved_config, proxy, override=None, *, refresh=False, reason=None):
+    """Validate v2 connections or explicitly migrate a legacy full-config hash.
+
+    A legacy hash cannot prove its original endpoint. The explicit migration
+    records the operator's confirmation; an existing migration cannot rebind.
+    The caller alone publishes a newly returned override to its control file.
+    """
+    if not isinstance(saved_config, dict) or 'proxy_id' not in saved_config:
+        raise CrawlerError('state_invalid', '恢复记录缺少代理身份')
+    version = saved_config.get('proxy_identity_version', 1)
+    if type(version) is not int or version not in (1, 2):
+        raise CrawlerError('state_invalid', '代理身份版本不兼容')
+    connection_id = proxy_identity(proxy)
+    frozen_id = saved_config['proxy_id']
+    if version == 2:
+        if override is not None:
+            raise CrawlerError('state_invalid', '新版代理身份不能附加旧版迁移记录')
+        if connection_id != frozen_id:
+            raise CrawlerError('config_invalid', '恢复时代理连接配置不能静默改变')
+        return None
+    if override is not None:
+        if (not isinstance(override, dict) or override.get('proxy_identity_version') != 2
+                or frozen_id is None or override.get('legacy_proxy_id') != frozen_id
+                or not isinstance(override.get('proxy_id'), str) or not override['proxy_id']):
+            raise CrawlerError('state_invalid', '代理迁移凭据与原始固定计划不符')
+        try:
+            parse_utc(override['migrated_at'])
+        except (KeyError, AttributeError, TypeError, ValueError, CrawlerError) as error:
+            raise CrawlerError('state_invalid', '代理迁移凭据缺少有效确认时间') from error
+        if override.get('proxy_id') != connection_id:
+            raise CrawlerError('config_invalid', '恢复时代理连接配置不能静默改变')
+        return override
+    if refresh:
+        if frozen_id is None or proxy is None:
+            raise CrawlerError('config_invalid', '刷新代理凭据不能添加或移除代理连接')
+        return {'proxy_identity_version': 2, 'proxy_id': connection_id,
+                'legacy_proxy_id': frozen_id, 'migrated_at': utc_now(), 'reason': reason}
+    legacy_id = stable_hash(proxy) if proxy else None
+    if legacy_id != frozen_id:
+        raise CrawlerError('config_invalid', '旧批次代理认证已变化；确认连接相同时请显式刷新代理凭据')
+    return None
+
+
 def public_config(config):
     excluded = {'accounts', 'proxy', 'output'}
     value = {key: copy.deepcopy(item) for key, item in config.items() if key not in excluded and key not in ('envelope',)}
     value['account_aliases'] = [a['alias'] for a in config['accounts']]
-    value['proxy_id'] = stable_hash(config['proxy']) if config['proxy'] else None
+    value['proxy_identity_version'] = 2
+    value['proxy_id'] = proxy_identity(config['proxy'])
     return value
 
 

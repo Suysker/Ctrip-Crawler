@@ -54,6 +54,16 @@ python ctrip_flights_scraper.py --check-environment
 
 按实际使用方式检查配置、浏览器启动、任务提交及恢复。Windows 与 Linux 均应验证分发成品，不能只测试维护片段。
 
+## 受控故障恢复
+
+`tests/e2e/run_incident_recovery.py` 使用真实 Camoufox、生产父子进程和 CLI 入口，在本地拦截全部页面请求，无需账号或访问携程。它将当前单文件复制到空验证目录，依次验证正常任务提交、协议错误暂停、导航错误重试耗尽、普通恢复不扩额度，以及显式追加额度后继续原批次。
+
+```bash
+python tests/e2e/run_incident_recovery.py --output artifacts/recovery-check
+```
+
+每次使用新的空目录。`acceptance.json` 保存成品摘要、各阶段退出码和验收结果，`events.jsonl` 保存受控请求事件；同时检查缺列表的未完成通知能够继续等待、已完成 CSV 和 meta 不变、原始计划不变、人工恢复记录进入结果凭据。该场景用于验证恢复链路，不代表真实代理或账号已通过验收。
+
 ## 受控长跑
 
 `tests/e2e/run_soak.py` 使用真实 Camoufox 和生产调度逻辑，通过受控响应避免持续请求真实网站。

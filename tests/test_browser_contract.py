@@ -17,19 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def load_browser():
     temporary = tempfile.TemporaryDirectory()
     path = Path(temporary.name) / 'browser_contract.py'
-    header = '''from __future__ import annotations
-import asyncio,copy,hashlib,json,os,platform,re,time,uuid
-from datetime import datetime,timezone
-from pathlib import Path
-from urllib.parse import urlencode,urlparse
-from decimal import Decimal,InvalidOperation
-from zoneinfo import ZoneInfo
-class CrawlerError(Exception):
-    def __init__(self,code,message,**kwargs):
-        self.code=code
-        self.retry_after=kwargs.get('retry_after')
-        super().__init__(message)
-'''
+    header = (ROOT / 'source_sections/imports.py.inc').read_text(encoding='utf-8') + '\n'
     path.write_text(header + (ROOT / 'source_sections/processing.py.inc').read_text(encoding='utf-8') + '\n'
                     + (ROOT / 'source_sections/browser.py.inc').read_text(encoding='utf-8'), encoding='utf-8')
     spec=importlib.util.spec_from_file_location('browser_contract',path)
@@ -181,21 +169,51 @@ class BrowserContractTests(unittest.TestCase):
             chain.accept('/international/search/api/search/pull/search-1','POST',body(),200,invalid)
         self.assertEqual(error.exception.code,'protocol_changed')
 
-    def test_missing_initial_or_unfinished_list_cannot_establish_a_complete_result(self):
-        for initial_finished in (False,True):
-            with self.subTest(initial_finished=initial_finished):
-                chain=self.module.SearchChain(task())
-                missing={'status':0,'data':{'context':{'searchId':'search-1','finished':initial_finished}}}
-                with self.assertRaises(self.module.CrawlerError) as error:
-                    chain.accept(self.module.SEARCH_API_PATH,'POST',body(),200,missing)
-                self.assertEqual(error.exception.code,'protocol_changed')
+    def test_initial_pending_notice_waits_for_a_later_valid_snapshot(self):
         chain=self.module.SearchChain(task())
-        partial={'status':0,'data':{'context':{'searchId':'search-1','finished':False},'flightItineraryList':[]}}
-        missing={'status':0,'data':{'context':{'searchId':'search-2','finished':False}}}
-        chain.accept(self.module.SEARCH_API_PATH,'POST',body(),200,partial)
-        with self.assertRaises(self.module.CrawlerError) as error:
-            chain.accept('/international/search/api/search/pull/search-1','POST',body(),200,missing)
-        self.assertEqual(error.exception.code,'protocol_changed')
+        pending={'status':0,'data':{'context':{'searchId':'search-1','finished':False}}}
+        complete={'status':0,'data':{'context':{'searchId':'search-2','finished':True},
+                                    'flightItineraryList':[{'itineraryId':'current'}]}}
+        self.assertIsNone(chain.accept(self.module.SEARCH_API_PATH,'POST',body(),200,pending))
+        self.assertIsNone(chain.itineraries)
+        self.assertIs(chain.accept('/international/search/api/search/pull/search-1','POST',body(),200,complete),complete)
+
+    def test_intermediate_pending_notice_retains_the_known_snapshot_until_completion(self):
+        for snapshot in ([],[{'itineraryId':'current'}]):
+            with self.subTest(snapshot=snapshot):
+                chain=self.module.SearchChain(task())
+                first={'status':0,'data':{'context':{'searchId':'search-1','finished':False},'flightItineraryList':snapshot}}
+                pending={'status':0,'data':{'context':{'searchId':'search-2','finished':False}}}
+                complete={'status':0,'data':{'context':{'searchId':'search-3','finished':True}}}
+                chain.accept(self.module.SEARCH_API_PATH,'POST',body(),200,first)
+                self.assertIsNone(chain.accept('/international/search/api/search/pull/search-1','POST',body(),200,pending))
+                result=chain.accept('/international/search/api/search/pull/search-2','POST',body(),200,complete)
+                self.assertEqual(result['data']['flightItineraryList'],snapshot)
+
+    def test_unrelated_pending_notice_cannot_advance_the_current_chain(self):
+        chain=self.module.SearchChain(task())
+        first={'status':0,'data':{'context':{'searchId':'search-1','finished':False}}}
+        unrelated={'status':0,'data':{'context':{'searchId':'unrelated','finished':False}}}
+        complete={'status':0,'data':{'context':{'searchId':'search-2','finished':True},'flightItineraryList':[]}}
+        chain.accept(self.module.SEARCH_API_PATH,'POST',body(),200,first)
+        wrong=body();wrong['transactionID']='other'
+        self.assertIsNone(chain.accept('/international/search/api/search/pull/search-1','POST',wrong,200,unrelated))
+        self.assertIsNone(chain.accept('/international/search/api/search/pull/other','POST',body(),200,unrelated))
+        self.assertIs(chain.accept('/international/search/api/search/pull/search-1','POST',body(),200,complete),complete)
+
+    def test_finished_notice_without_any_known_snapshot_is_still_invalid(self):
+        for initially_pending in (False,True):
+            with self.subTest(initially_pending=initially_pending):
+                chain=self.module.SearchChain(task())
+                path=self.module.SEARCH_API_PATH
+                if initially_pending:
+                    pending={'status':0,'data':{'context':{'searchId':'search-1','finished':False}}}
+                    chain.accept(path,'POST',body(),200,pending)
+                    path='/international/search/api/search/pull/search-1'
+                missing={'status':0,'data':{'context':{'searchId':'search-2','finished':True}}}
+                with self.assertRaises(self.module.CrawlerError) as error:
+                    chain.accept(path,'POST',body(),200,missing)
+                self.assertEqual(error.exception.code,'protocol_changed')
 
     def test_completion_notice_confirms_an_already_explicit_empty_snapshot(self):
         chain=self.module.SearchChain(task())
@@ -412,8 +430,12 @@ class LookupDOMContractTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CollectBoundaryContractTests(unittest.IsolatedAsyncioTestCase):
-    async def collect_responses(self, responses):
+    async def collect_responses(self, responses, deadline_seconds=30, config=None, capture_comfort=False):
         temporary,module=load_browser()
+        self.read_bodies=[]
+        self.detail_ui_calls=[]
+        read_bodies=self.read_bodies
+        detail_ui_calls=self.detail_ui_calls
         class Request:
             def __init__(self, payload, method):
                 self.post_data_json=payload;self.method=method
@@ -421,17 +443,27 @@ class CollectBoundaryContractTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self, path, payload, status, response_payload, method='POST'):
                 self.url='https://flights.ctrip.com'+path;self.request=Request(payload,method)
                 self.status=status;self.headers={};self.payload=response_payload
-            async def body(self):return json.dumps(self.payload).encode()
+            async def body(self):
+                read_bodies.append(self.url)
+                return json.dumps(self.payload).encode()
         class Page:
             def on(self, kind, callback):self.callback=callback
             def remove_listener(self,*args):pass
             async def goto(self,*args,**kwargs):
                 for args in responses:self.callback(Response(*args))
+            def locator(self,*args):
+                detail_ui_calls.append(args)
+                raise AssertionError('This fixture must not trigger detail UI')
             async def close(self):pass
         class Context:
             async def new_page(self):return Page()
-        session=module.BrowserSession({}, {}, {}, None);session.context=Context()
-        try:return await session.collect(task(),30)
+        session=module.BrowserSession(config or {}, {}, {}, None);session.context=Context()
+        if capture_comfort:
+            async def collect_comfort(page, task, rows, queue, deadline, errors):
+                self.comfort_window=deadline-module.time.monotonic()
+                return module.apply_comfort(rows,[])
+            session._collect_comfort=collect_comfort
+        try:return await session.collect(task(),deadline_seconds)
         finally:temporary.cleanup()
 
     async def test_unrelated_failed_initial_response_cannot_interrupt_current_query(self):
@@ -441,6 +473,44 @@ class CollectBoundaryContractTests(unittest.IsolatedAsyncioTestCase):
             ('/international/search/api/search/batchSearch',wrong,503,None),
             ('/international/search/api/search/batchSearch',body(),200,complete)])
         self.assertEqual(result['status'],'empty')
+
+    async def test_only_pending_notices_reach_the_attempt_timeout_without_publishing(self):
+        first={'status':0,'data':{'context':{'searchId':'search-1','finished':False}}}
+        next_notice={'status':0,'data':{'context':{'searchId':'search-2','finished':False}}}
+        with self.assertRaises(Exception) as error:
+            await self.collect_responses([
+                ('/international/search/api/search/batchSearch',body(),200,first),
+                ('/international/search/api/search/pull/search-1',body(),200,next_notice)],deadline_seconds=10.1)
+        self.assertEqual(getattr(error.exception,'code',None),'response_timeout')
+        self.assertEqual(len(self.read_bodies),2)
+
+    async def test_comfort_budget_changes_the_window_without_extending_the_attempt(self):
+        from test_processing import itinerary
+        complete={'status':0,'data':{'context':{'searchId':'done','finished':True},'flightItineraryList':[itinerary()]}}
+        for configured,attempt,expected in [(0.5,90,0.5),(25,90,25),(1000,12,2)]:
+            with self.subTest(configured=configured,attempt=attempt):
+                await self.collect_responses([
+                    ('/international/search/api/search/batchSearch',body(),200,complete)],deadline_seconds=attempt,
+                    config={'comft_flight':True,'comfort_timeout':configured},capture_comfort=True)
+                self.assertAlmostEqual(self.comfort_window,expected,delta=0.1)
+
+    async def test_comfort_budget_defaults_to_fifteen_for_an_existing_config(self):
+        from test_processing import itinerary
+        complete={'status':0,'data':{'context':{'searchId':'done','finished':True},'flightItineraryList':[itinerary()]}}
+        await self.collect_responses([
+            ('/international/search/api/search/batchSearch',body(),200,complete)],deadline_seconds=90,
+            config={'comft_flight':True},capture_comfort=True)
+        self.assertAlmostEqual(self.comfort_window,15,delta=0.1)
+
+    async def test_zero_comfort_budget_delivers_quotes_without_triggering_details(self):
+        from test_processing import itinerary
+        complete={'status':0,'data':{'context':{'searchId':'done','finished':True},'flightItineraryList':[itinerary()]}}
+        result=await self.collect_responses([
+            ('/international/search/api/search/batchSearch',body(),200,complete)],deadline_seconds=90,
+            config={'comft_flight':True,'comfort_timeout':0})
+        self.assertEqual(result['status'],'succeeded')
+        self.assertEqual(result['comfort_status'],'unavailable')
+        self.assertEqual(self.detail_ui_calls,[])
 
     async def test_unrelated_pull_path_method_and_transaction_are_filtered_before_status(self):
         partial={'status':0,'data':{'context':{'searchId':'current','finished':False},'flightItineraryList':[]}}

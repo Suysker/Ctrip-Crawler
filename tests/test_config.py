@@ -85,6 +85,24 @@ def test_invalid_time_budget_is_rejected_before_runtime(app, key, value):
     assert caught.value.code == 'config_invalid'
 
 
+def test_comfort_budget_keeps_the_existing_default(app):
+    assert app.DEFAULT_CONFIG['comfort_timeout'] == 15.0
+
+
+@pytest.mark.parametrize('value', [0, 6.5])
+def test_comfort_budget_accepts_finite_nonnegative_values(app, value):
+    cfg = dict(app.DEFAULT_CONFIG, login_allowed=False, comfort_timeout=value)
+    assert app.validate_config(cfg)['comfort_timeout'] == value
+
+
+@pytest.mark.parametrize('value', [-1, float('nan'), float('inf'), float('-inf'), True, '15', None])
+def test_comfort_budget_rejects_invalid_values_before_runtime(app, value):
+    cfg = dict(app.DEFAULT_CONFIG, login_allowed=False, comfort_timeout=value)
+    with pytest.raises(app.CrawlerError) as caught:
+        app.validate_config(cfg)
+    assert caught.value.code == 'config_invalid'
+
+
 @pytest.mark.parametrize('server', ['http://', 'socks5://', 'https://host:bad', 'http://host:-1'])
 def test_proxy_needs_a_valid_host_and_port(app, server):
     cfg = dict(app.DEFAULT_CONFIG, login_allowed=False, proxy={'server': server})

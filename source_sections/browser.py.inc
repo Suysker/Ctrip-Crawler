@@ -171,7 +171,7 @@ def comfort_request_identity(payload, task, aliases):
 
 
 class SearchChain:
-    """Linked nonempty snapshots replace each other; empty pulls retain them."""
+    """Track linked snapshots and pending notices until explicit completion."""
     def __init__(self, task):
         self.task = task
         self.search_id = None
@@ -215,16 +215,17 @@ class SearchChain:
             itineraries = data["flightItineraryList"]
             if not isinstance(itineraries, list):
                 raise CrawlerError("protocol_changed", "Search itinerary structure is invalid")
-        elif not context["finished"] or self.itineraries is None:
+        elif context["finished"] and self.itineraries is None:
             raise CrawlerError("protocol_changed", "Search response has no known itinerary snapshot")
         else:
             itineraries = None
+        # A pending response may advance the poll chain before a snapshot arrives.
         self.transaction_id = request_payload["transactionID"]
         self.search_id = context["searchId"]
         # The site's SEARCH_FLIGHTS reducer retains a nonempty list when a
         # later pull carries no itineraries, while still applying isFinished.
         # Nonempty responses replace the snapshot; they are never appended.
-        if itineraries or self.itineraries is None:
+        if itineraries is not None and (itineraries or self.itineraries is None):
             self.itineraries = itineraries
         if not context["finished"]:
             return None
@@ -248,8 +249,10 @@ class BrowserSession:
         self.challenge_page = None
         self.challenge_handle = None
         self.auth_checkpoint = None
+        self.diagnostic_stage = 'startup.browser'
 
     async def start(self):
+        self.diagnostic_stage = 'startup.browser'
         from camoufox.async_api import AsyncCamoufox
         self.manager = AsyncCamoufox(from_options=identity_launch_options(self.identity, self.config))
         try:
@@ -293,18 +296,22 @@ class BrowserSession:
             raise CrawlerError("protocol_changed", "A target interface returned a non-JSON response") from exc
 
     async def resolve_cities(self, names):
+        self.diagnostic_stage = 'resolve.page'
         page = await self.context.new_page()
         try:
+            self.diagnostic_stage = 'resolve.navigation'
             await page.goto(CTRIP_HOME, wait_until="domcontentloaded",
                             timeout=self.config.get("navigation_timeout", 30) * 1000)
             result = []
             for name in names:
+                self.diagnostic_stage = 'resolve.city_lookup'
                 endpoint = "/international/search/api/poi/search?" + urlencode({"key": name, "filterAirport": "false"})
                 async with page.expect_response(lambda response: response.request.method == "GET"
                         and response.url == "https://flights.ctrip.com" + endpoint,
                         timeout=self.config.get("action_timeout", 10) * 1000) as response_info:
                     await page.evaluate("endpoint => fetch(endpoint, {credentials: 'same-origin'}).then(() => null)", endpoint)
                 payload = await self._read_json(await response_info.value)
+                self.diagnostic_stage = 'resolve.normalize'
                 result.append(resolve_city_payload(payload, name))
             return result
         finally:
@@ -402,6 +409,7 @@ class BrowserSession:
 
     async def collect(self, task, deadline_seconds):
         from playwright.async_api import Error as BrowserError
+        self.diagnostic_stage = 'collect.page'
         page = await self.context.new_page()
         queue = asyncio.Queue(maxsize=self.config.get("max_candidates", 64))
         comfort_queue = asyncio.Queue(maxsize=self.config.get("max_candidates", 64))
@@ -434,9 +442,11 @@ class BrowserSession:
             url = ("https://flights.ctrip.com/online/list/oneway-" + task["origin"]["code"].lower()
                    + "-" + task["destination"]["code"].lower() + "?" + urlencode({
                        "depdate": task["departure_date"], "cabin": "y_s_c_f", "adult": 1, "child": 0, "infant": 0}))
+            self.diagnostic_stage = 'collect.navigation'
             await page.goto(url, wait_until="domcontentloaded", timeout=max(1, min(
                 self.config.get("navigation_timeout", 30), deadline - time.monotonic())) * 1000)
             while final_payload is None:
+                self.diagnostic_stage = 'collect.wait_response'
                 if overflow:
                     raise CrawlerError("response_too_large", "The target response queue exceeded its capacity")
                 remaining = deadline - time.monotonic() - 10
@@ -450,12 +460,40 @@ class BrowserSession:
                     request_payload = None
                 if not chain.matches_request(path, response.request.method, request_payload):
                     continue
+                self.diagnostic_stage = 'collect.decode_response'
                 payload = await self._read_json(response)
-                final_payload = chain.accept(path, response.request.method, request_payload, response.status, payload)
+                self.diagnostic_stage = 'collect.protocol'
+                data = payload.get('data') if isinstance(payload, dict) else None
+                context = data.get('context') if isinstance(data, dict) else None
+                context = context if isinstance(context, dict) else {}
+                items = data.get('flightItineraryList') if isinstance(data, dict) else None
+                transaction = request_payload.get('transactionID')
+                search_id = context.get('searchId')
+                summary = {
+                    'http_status': response.status,
+                    'business_status': payload.get('status') if isinstance(payload, dict) else None,
+                    'finished': context.get('finished') if type(context.get('finished')) is bool else None,
+                    'finished_type': type(context['finished']).__name__ if 'finished' in context else 'missing',
+                    'list_present': isinstance(data, dict) and 'flightItineraryList' in data,
+                    'list_type': type(items).__name__ if isinstance(data, dict) and 'flightItineraryList' in data else 'missing',
+                    'list_count': len(items) if isinstance(items, list) else None,
+                    'known_snapshot': chain.itineraries is not None,
+                    'request_matches': True, 'transaction_present': bool(transaction),
+                    'transaction_matches': transaction == chain.transaction_id if chain.transaction_id is not None else None,
+                    'search_id_present': bool(search_id),
+                    'search_id_matches': search_id == chain.search_id if chain.search_id is not None else None,
+                }
+                try:
+                    final_payload = chain.accept(path, response.request.method, request_payload, response.status, payload)
+                except CrawlerError as exc:
+                    exc.diagnostic.update(stage=self.diagnostic_stage, protocol=summary)
+                    raise
             observed_at = datetime.now(timezone.utc).isoformat()
+            self.diagnostic_stage = 'collect.normalize'
             observation = normalize_response(final_payload, task, self.config, observed_at)
             if self.config.get("comft_flight"):
-                comfort_deadline = min(deadline - 10, time.monotonic() + 15)
+                self.diagnostic_stage = 'collect.comfort'
+                comfort_deadline = min(deadline - 10, time.monotonic() + self.config.get("comfort_timeout", 15))
                 observation.update(await self._collect_comfort(page, task, observation["rows"],
                                                               comfort_queue, comfort_deadline, comfort_errors))
             return observation
@@ -476,6 +514,7 @@ class BrowserSession:
 
     async def authenticate(self, account, timeout, challenge_handle=None):
         from playwright.async_api import TimeoutError as BrowserTimeout
+        self.diagnostic_stage = 'auth.prepare'
         self.auth_checkpoint = None
         if not account:
             raise CrawlerError("needs_auth", "Authentication requires a configured account")
@@ -533,6 +572,7 @@ class BrowserSession:
         self.context.on("response", receive_member)
         try:
             if not transferred_challenge:
+                self.diagnostic_stage = 'auth.session_check'
                 await page.goto(CTRIP_HOME, wait_until="domcontentloaded", timeout=min(
                     self.config.get("navigation_timeout", 30), max(1, deadline - time.monotonic())) * 1000)
                 try:
@@ -545,6 +585,7 @@ class BrowserSession:
                 if self.config.get("headless", True) and not account.get("password"):
                     raise CrawlerError("needs_auth", "The saved session is not valid; headless login requires a password")
                 login_url = "https://passport.ctrip.com/user/login?" + urlencode({"BackUrl": CTRIP_HOME})
+                self.diagnostic_stage = 'auth.login'
                 await page.goto(login_url, wait_until="domcontentloaded", timeout=min(
                     self.config.get("navigation_timeout", 30), max(1, deadline - time.monotonic())) * 1000)
                 if account.get("username") and account.get("password"):
@@ -554,6 +595,7 @@ class BrowserSession:
                     await panel.locator('[data-testid="passwordInput"]').fill(account["password"], timeout=action_timeout())
                     await accept_login_agreement(page, action_timeout())
                     await panel.locator('[data-testid="loginButton"]').click(timeout=action_timeout())
+            self.diagnostic_stage = 'auth.wait_verification'
             while time.monotonic() < deadline:
                 check_member_failure()
                 if authenticated.is_set():

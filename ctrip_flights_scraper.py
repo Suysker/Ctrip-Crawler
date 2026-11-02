@@ -55,15 +55,17 @@ RUNTIME_REQUIREMENTS = {
     'camoufox': '0.5.8', 'playwright': '1.60.0', 'fpgen': '1.3.0',
     'filelock': '4.2.6', 'psutil': '7.2.2', 'tzdata': '2026.6',
 }
+DIAGNOSTIC_MAX_BYTES = 8192
 
 
 class CrawlerError(Exception):
     """A boundary failure with an actionable, stable category."""
 
-    def __init__(self, code, message, *, retry_after=None):
+    def __init__(self, code, message, *, retry_after=None, diagnostic=None):
         super().__init__(message)
         self.code = code
         self.retry_after = retry_after
+        self.diagnostic = dict(diagnostic or {})
 
 
 def utc_now():
@@ -82,11 +84,121 @@ def stable_hash(value):
                                     separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
 
 
-def safe_message(error):
-    """Do not emit URLs, request payloads, or credentials from third-party errors."""
-    if isinstance(error, CrawlerError):
-        return str(error)
-    return type(error).__name__
+def _diagnostic_secrets(config, command):
+    values = set()
+
+    def visit(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in ('username', 'password', 'token', 'access_token', 'refresh_token', 'cookie', 'authorization'):
+                    if isinstance(item, str) and item:
+                        values.add(item)
+                elif isinstance(item, (dict, list, tuple)):
+                    visit(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                visit(item)
+
+    visit(config)
+    visit(command)
+    return sorted(values, key=len, reverse=True)
+
+
+def _diagnostic_text(value, secrets, limit=1024):
+    text = str(value)
+
+    def origin(match):
+        try:
+            parsed = urlparse(match.group())
+            host = parsed.hostname
+            if not host:
+                return '[url omitted]'
+            port = ':' + str(parsed.port) if parsed.port is not None else ''
+            return '[url ' + parsed.scheme + '://' + host + port + ']'
+        except ValueError:
+            return '[url omitted]'
+
+    text = re.sub(r'(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"\']+', origin, text)
+    for secret in secrets:
+        text = text.replace(secret, '[redacted]')
+        escaped = json.dumps(secret, ensure_ascii=False)[1:-1]
+        if escaped != secret:
+            text = text.replace(escaped, '[redacted]')
+    text = re.sub(r'(?im)\b(?:authorization|cookie|set-cookie)\s*:[^\r\n]*', '[private header omitted]', text)
+    text = re.sub(r'(?i)\b(?:password|passwd|pwd|username|account|token|secret)\s*[:=]\s*(?:"[^"\r\n]*"|\'[^\'\r\n]*\'|[^\s,;]+)',
+                  '[private value omitted]', text)
+    text = re.sub(r'(?is)\b(?:payload|response|body)\s*[:=]\s*[\[{].*', '[structured data omitted]', text)
+    text = re.sub(r'(?s)\{.*(?:\}|$)', '[structured data omitted]', text)
+    text = re.sub(r'(["\'])(?:[A-Za-z]:[\\/]|\\\\|/).*?\1', '[path omitted]', text)
+    text = re.sub(r'(?<!\w)[A-Za-z]:[\\/][^\s"\'<>]*|(?<![\w:/])/(?:[^\s"\'<>]+)|\\\\[^\s"\'<>]+', '[path omitted]', text)
+    return ' '.join(text.split())[:limit]
+
+
+def safe_message(error, config=None, command=None):
+    """Keep the useful failure text while removing private inputs and paths."""
+    return _diagnostic_text(error, _diagnostic_secrets(config, command))
+
+
+def make_diagnostic(error, *, stage=None, config=None, command=None):
+    """One bounded diagnostic schema for local errors and worker failures."""
+    secrets = _diagnostic_secrets(config, command)
+    supplied = getattr(error, 'diagnostic', {}) or {}
+    name = supplied.get('exception_type', type(error).__name__)
+    if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,79}', name):
+        name = type(error).__name__
+    result = {'exception_type': name,
+              'message': _diagnostic_text(supplied.get('message', str(error)), secrets),
+              'stage': _diagnostic_text(supplied.get('stage') or stage or 'unknown', secrets, 80),
+              'frames': []}
+    frames = supplied.get('frames')
+    if not isinstance(frames, list):
+        frames = [{'file': frame.filename, 'line': frame.lineno, 'function': frame.name}
+                  for frame in traceback.extract_tb(error.__traceback__, limit=8)]
+    for frame in frames[-8:]:
+        if isinstance(frame, dict) and type(frame.get('line')) is int:
+            filename = str(frame.get('file', '')).replace('\\', '/').rsplit('/', 1)[-1]
+            result['frames'].append({'file': _diagnostic_text(filename, secrets, 120),
+                                     'line': frame['line'],
+                                     'function': _diagnostic_text(frame.get('function', ''), secrets, 120)})
+    protocol = supplied.get('protocol')
+    if isinstance(protocol, dict):
+        summary = {}
+        for key in ('http_status', 'business_status', 'list_count'):
+            value = protocol.get(key)
+            if value is None or (type(value) is int and abs(value) < 10 ** 12):
+                if key in protocol:
+                    summary[key] = value
+        for key in ('finished', 'list_present', 'known_snapshot', 'request_matches', 'transaction_present',
+                    'transaction_matches', 'search_id_present', 'search_id_matches'):
+            if key in protocol and (protocol[key] is None or type(protocol[key]) is bool):
+                summary[key] = protocol[key]
+        for key in ('finished_type', 'list_type'):
+            if protocol.get(key) in ('missing', 'NoneType', 'bool', 'dict', 'list', 'int', 'str', 'float'):
+                summary[key] = protocol[key]
+        result['protocol'] = summary
+    causes = []
+    if isinstance(supplied.get('causes'), list):
+        for cause in supplied['causes'][:3]:
+            if (isinstance(cause, dict) and isinstance(cause.get('exception_type'), str)
+                    and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,79}', cause['exception_type'])):
+                causes.append({'exception_type': cause['exception_type'],
+                               'message': _diagnostic_text(cause.get('message', ''), secrets, 256)})
+    else:
+        cause = error.__cause__
+        while cause is not None and len(causes) < 3:
+            causes.append({'exception_type': type(cause).__name__, 'message': _diagnostic_text(cause, secrets, 256)})
+            cause = cause.__cause__
+    if causes:
+        result['causes'] = causes
+    while len(json.dumps(result, ensure_ascii=False).encode('utf-8')) > DIAGNOSTIC_MAX_BYTES:
+        result['truncated'] = True
+        if result['frames']:
+            result['frames'].pop(0)
+        elif result.get('causes'):
+            result['causes'].pop()
+        else:
+            result['message'] = result['message'][:len(result['message']) // 2]
+    return result
 
 # ================ config ================
 # Edit this block when using the downloaded standalone script.
@@ -111,6 +223,7 @@ DEFAULT_CONFIG = {
     'action_timeout': 10.0,
     'navigation_timeout': 30.0,
     'attempt_timeout': 90.0,
+    'comfort_timeout': 15.0,
     'task_budget': 300.0,
     'auth_budget': 600.0,
     'login_timeout': 60.0,
@@ -188,10 +301,10 @@ def validate_config(config):
         raise CrawlerError('config_invalid', '请在顶部 accounts 配置账号池，或明确使用 --anonymous')
     if not config['login_allowed'] and enabled:
         raise CrawlerError('config_invalid', '匿名模式不能同时配置启用账号')
-    nonnegative_times = {'crawl_interval', 'cooldown_seconds'}
+    nonnegative_times = {'crawl_interval', 'cooldown_seconds', 'comfort_timeout'}
     for key in ('attempt_timeout', 'task_budget', 'auth_budget', 'startup_timeout', 'close_timeout',
                 'action_timeout', 'navigation_timeout', 'login_timeout', 'challenge_timeout',
-                'standalone_auth_timeout', 'crawl_interval', 'cooldown_seconds'):
+                'standalone_auth_timeout', 'crawl_interval', 'cooldown_seconds', 'comfort_timeout'):
         value = config[key]
         if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
                 or (value < 0 if key in nonnegative_times else value <= 0)):
@@ -206,6 +319,8 @@ def validate_config(config):
             if not isinstance(proxy, dict) or not isinstance(proxy.get('server'), str):
                 raise ValueError('proxy')
             parsed = urlparse(proxy['server'])
+            if parsed.username is not None or parsed.password is not None:
+                raise CrawlerError('config_invalid', '代理凭据必须放在独立的 username/password 字段中')
             if (parsed.scheme not in ('http', 'https', 'socks5') or not parsed.hostname
                     or any(character.isspace() for character in parsed.hostname)
                     or (parsed.port is not None and not 1 <= parsed.port <= 65535)):
@@ -216,11 +331,63 @@ def validate_config(config):
     return config
 
 
+def proxy_identity(proxy):
+    """Bind connection settings; authentication material may be refreshed."""
+    if proxy is None:
+        return None
+    return stable_hash({key: value for key, value in proxy.items()
+                        if key not in ('username', 'password')})
+
+
+def validate_proxy_binding(saved_config, proxy, override=None, *, refresh=False, reason=None):
+    """Validate v2 connections or explicitly migrate a legacy full-config hash.
+
+    A legacy hash cannot prove its original endpoint. The explicit migration
+    records the operator's confirmation; an existing migration cannot rebind.
+    The caller alone publishes a newly returned override to its control file.
+    """
+    if not isinstance(saved_config, dict) or 'proxy_id' not in saved_config:
+        raise CrawlerError('state_invalid', '恢复记录缺少代理身份')
+    version = saved_config.get('proxy_identity_version', 1)
+    if type(version) is not int or version not in (1, 2):
+        raise CrawlerError('state_invalid', '代理身份版本不兼容')
+    connection_id = proxy_identity(proxy)
+    frozen_id = saved_config['proxy_id']
+    if version == 2:
+        if override is not None:
+            raise CrawlerError('state_invalid', '新版代理身份不能附加旧版迁移记录')
+        if connection_id != frozen_id:
+            raise CrawlerError('config_invalid', '恢复时代理连接配置不能静默改变')
+        return None
+    if override is not None:
+        if (not isinstance(override, dict) or override.get('proxy_identity_version') != 2
+                or frozen_id is None or override.get('legacy_proxy_id') != frozen_id
+                or not isinstance(override.get('proxy_id'), str) or not override['proxy_id']):
+            raise CrawlerError('state_invalid', '代理迁移凭据与原始固定计划不符')
+        try:
+            parse_utc(override['migrated_at'])
+        except (KeyError, AttributeError, TypeError, ValueError, CrawlerError) as error:
+            raise CrawlerError('state_invalid', '代理迁移凭据缺少有效确认时间') from error
+        if override.get('proxy_id') != connection_id:
+            raise CrawlerError('config_invalid', '恢复时代理连接配置不能静默改变')
+        return override
+    if refresh:
+        if frozen_id is None or proxy is None:
+            raise CrawlerError('config_invalid', '刷新代理凭据不能添加或移除代理连接')
+        return {'proxy_identity_version': 2, 'proxy_id': connection_id,
+                'legacy_proxy_id': frozen_id, 'migrated_at': utc_now(), 'reason': reason}
+    legacy_id = stable_hash(proxy) if proxy else None
+    if legacy_id != frozen_id:
+        raise CrawlerError('config_invalid', '旧批次代理认证已变化；确认连接相同时请显式刷新代理凭据')
+    return None
+
+
 def public_config(config):
     excluded = {'accounts', 'proxy', 'output'}
     value = {key: copy.deepcopy(item) for key, item in config.items() if key not in excluded and key not in ('envelope',)}
     value['account_aliases'] = [a['alias'] for a in config['accounts']]
-    value['proxy_id'] = stable_hash(config['proxy']) if config['proxy'] else None
+    value['proxy_identity_version'] = 2
+    value['proxy_id'] = proxy_identity(config['proxy'])
     return value
 
 
@@ -539,6 +706,7 @@ class FileStore:
                           comfort_status=observation.get('comfort_status', 'disabled'),
                           comfort_reason=observation.get('comfort_reason'),
                           price_status=observation['price_status'], price_reason=observation['price_reason'],
+                          manual_recoveries=_files_copy.deepcopy(current.get('manual_recoveries')),
                           account_alias=task.get('account_alias'), binding_epoch=task.get('binding_epoch'))
             progress['publish_intent'] = intent
             self.save_progress(progress)
@@ -551,6 +719,8 @@ class FileStore:
 
     def _finish_publication(self, progress):
         intent = progress['publish_intent']
+        if intent.get('manual_recoveries') != (progress.get('current') or {}).get('manual_recoveries'):
+            _files_fail('Manual recovery evidence differs from the current task')
         temporary, target = self._check_stage(intent, progress)
         meta_path = target.with_suffix('.meta.json')
         if target.exists():
@@ -566,7 +736,8 @@ class FileStore:
         if meta_path.exists():
             receipt = read_json(meta_path)
             for key in ('run_id', 'task_index', 'task_key', 'attempt_id', 'result_id', 'sha256', 'row_count',
-                        'target_path', 'comfort_status', 'comfort_reason', 'price_status', 'price_reason'):
+                        'target_path', 'comfort_status', 'comfort_reason', 'price_status', 'price_reason',
+                        'manual_recoveries'):
                 if receipt.get(key) != intent.get(key):
                     _files_fail('Receipt differs from current publication')
         else:
@@ -1359,7 +1530,7 @@ def comfort_request_identity(payload, task, aliases):
 
 
 class SearchChain:
-    """Linked nonempty snapshots replace each other; empty pulls retain them."""
+    """Track linked snapshots and pending notices until explicit completion."""
     def __init__(self, task):
         self.task = task
         self.search_id = None
@@ -1403,16 +1574,17 @@ class SearchChain:
             itineraries = data["flightItineraryList"]
             if not isinstance(itineraries, list):
                 raise CrawlerError("protocol_changed", "Search itinerary structure is invalid")
-        elif not context["finished"] or self.itineraries is None:
+        elif context["finished"] and self.itineraries is None:
             raise CrawlerError("protocol_changed", "Search response has no known itinerary snapshot")
         else:
             itineraries = None
+        # A pending response may advance the poll chain before a snapshot arrives.
         self.transaction_id = request_payload["transactionID"]
         self.search_id = context["searchId"]
         # The site's SEARCH_FLIGHTS reducer retains a nonempty list when a
         # later pull carries no itineraries, while still applying isFinished.
         # Nonempty responses replace the snapshot; they are never appended.
-        if itineraries or self.itineraries is None:
+        if itineraries is not None and (itineraries or self.itineraries is None):
             self.itineraries = itineraries
         if not context["finished"]:
             return None
@@ -1436,8 +1608,10 @@ class BrowserSession:
         self.challenge_page = None
         self.challenge_handle = None
         self.auth_checkpoint = None
+        self.diagnostic_stage = 'startup.browser'
 
     async def start(self):
+        self.diagnostic_stage = 'startup.browser'
         from camoufox.async_api import AsyncCamoufox
         self.manager = AsyncCamoufox(from_options=identity_launch_options(self.identity, self.config))
         try:
@@ -1481,18 +1655,22 @@ class BrowserSession:
             raise CrawlerError("protocol_changed", "A target interface returned a non-JSON response") from exc
 
     async def resolve_cities(self, names):
+        self.diagnostic_stage = 'resolve.page'
         page = await self.context.new_page()
         try:
+            self.diagnostic_stage = 'resolve.navigation'
             await page.goto(CTRIP_HOME, wait_until="domcontentloaded",
                             timeout=self.config.get("navigation_timeout", 30) * 1000)
             result = []
             for name in names:
+                self.diagnostic_stage = 'resolve.city_lookup'
                 endpoint = "/international/search/api/poi/search?" + urlencode({"key": name, "filterAirport": "false"})
                 async with page.expect_response(lambda response: response.request.method == "GET"
                         and response.url == "https://flights.ctrip.com" + endpoint,
                         timeout=self.config.get("action_timeout", 10) * 1000) as response_info:
                     await page.evaluate("endpoint => fetch(endpoint, {credentials: 'same-origin'}).then(() => null)", endpoint)
                 payload = await self._read_json(await response_info.value)
+                self.diagnostic_stage = 'resolve.normalize'
                 result.append(resolve_city_payload(payload, name))
             return result
         finally:
@@ -1590,6 +1768,7 @@ class BrowserSession:
 
     async def collect(self, task, deadline_seconds):
         from playwright.async_api import Error as BrowserError
+        self.diagnostic_stage = 'collect.page'
         page = await self.context.new_page()
         queue = asyncio.Queue(maxsize=self.config.get("max_candidates", 64))
         comfort_queue = asyncio.Queue(maxsize=self.config.get("max_candidates", 64))
@@ -1622,9 +1801,11 @@ class BrowserSession:
             url = ("https://flights.ctrip.com/online/list/oneway-" + task["origin"]["code"].lower()
                    + "-" + task["destination"]["code"].lower() + "?" + urlencode({
                        "depdate": task["departure_date"], "cabin": "y_s_c_f", "adult": 1, "child": 0, "infant": 0}))
+            self.diagnostic_stage = 'collect.navigation'
             await page.goto(url, wait_until="domcontentloaded", timeout=max(1, min(
                 self.config.get("navigation_timeout", 30), deadline - time.monotonic())) * 1000)
             while final_payload is None:
+                self.diagnostic_stage = 'collect.wait_response'
                 if overflow:
                     raise CrawlerError("response_too_large", "The target response queue exceeded its capacity")
                 remaining = deadline - time.monotonic() - 10
@@ -1638,12 +1819,40 @@ class BrowserSession:
                     request_payload = None
                 if not chain.matches_request(path, response.request.method, request_payload):
                     continue
+                self.diagnostic_stage = 'collect.decode_response'
                 payload = await self._read_json(response)
-                final_payload = chain.accept(path, response.request.method, request_payload, response.status, payload)
+                self.diagnostic_stage = 'collect.protocol'
+                data = payload.get('data') if isinstance(payload, dict) else None
+                context = data.get('context') if isinstance(data, dict) else None
+                context = context if isinstance(context, dict) else {}
+                items = data.get('flightItineraryList') if isinstance(data, dict) else None
+                transaction = request_payload.get('transactionID')
+                search_id = context.get('searchId')
+                summary = {
+                    'http_status': response.status,
+                    'business_status': payload.get('status') if isinstance(payload, dict) else None,
+                    'finished': context.get('finished') if type(context.get('finished')) is bool else None,
+                    'finished_type': type(context['finished']).__name__ if 'finished' in context else 'missing',
+                    'list_present': isinstance(data, dict) and 'flightItineraryList' in data,
+                    'list_type': type(items).__name__ if isinstance(data, dict) and 'flightItineraryList' in data else 'missing',
+                    'list_count': len(items) if isinstance(items, list) else None,
+                    'known_snapshot': chain.itineraries is not None,
+                    'request_matches': True, 'transaction_present': bool(transaction),
+                    'transaction_matches': transaction == chain.transaction_id if chain.transaction_id is not None else None,
+                    'search_id_present': bool(search_id),
+                    'search_id_matches': search_id == chain.search_id if chain.search_id is not None else None,
+                }
+                try:
+                    final_payload = chain.accept(path, response.request.method, request_payload, response.status, payload)
+                except CrawlerError as exc:
+                    exc.diagnostic.update(stage=self.diagnostic_stage, protocol=summary)
+                    raise
             observed_at = datetime.now(timezone.utc).isoformat()
+            self.diagnostic_stage = 'collect.normalize'
             observation = normalize_response(final_payload, task, self.config, observed_at)
             if self.config.get("comft_flight"):
-                comfort_deadline = min(deadline - 10, time.monotonic() + 15)
+                self.diagnostic_stage = 'collect.comfort'
+                comfort_deadline = min(deadline - 10, time.monotonic() + self.config.get("comfort_timeout", 15))
                 observation.update(await self._collect_comfort(page, task, observation["rows"],
                                                               comfort_queue, comfort_deadline, comfort_errors))
             return observation
@@ -1664,6 +1873,7 @@ class BrowserSession:
 
     async def authenticate(self, account, timeout, challenge_handle=None):
         from playwright.async_api import TimeoutError as BrowserTimeout
+        self.diagnostic_stage = 'auth.prepare'
         self.auth_checkpoint = None
         if not account:
             raise CrawlerError("needs_auth", "Authentication requires a configured account")
@@ -1721,6 +1931,7 @@ class BrowserSession:
         self.context.on("response", receive_member)
         try:
             if not transferred_challenge:
+                self.diagnostic_stage = 'auth.session_check'
                 await page.goto(CTRIP_HOME, wait_until="domcontentloaded", timeout=min(
                     self.config.get("navigation_timeout", 30), max(1, deadline - time.monotonic())) * 1000)
                 try:
@@ -1733,6 +1944,7 @@ class BrowserSession:
                 if self.config.get("headless", True) and not account.get("password"):
                     raise CrawlerError("needs_auth", "The saved session is not valid; headless login requires a password")
                 login_url = "https://passport.ctrip.com/user/login?" + urlencode({"BackUrl": CTRIP_HOME})
+                self.diagnostic_stage = 'auth.login'
                 await page.goto(login_url, wait_until="domcontentloaded", timeout=min(
                     self.config.get("navigation_timeout", 30), max(1, deadline - time.monotonic())) * 1000)
                 if account.get("username") and account.get("password"):
@@ -1742,6 +1954,7 @@ class BrowserSession:
                     await panel.locator('[data-testid="passwordInput"]').fill(account["password"], timeout=action_timeout())
                     await accept_login_agreement(page, action_timeout())
                     await panel.locator('[data-testid="loginButton"]').click(timeout=action_timeout())
+            self.diagnostic_stage = 'auth.wait_verification'
             while time.monotonic() < deadline:
                 check_member_failure()
                 if authenticated.is_set():
@@ -1893,6 +2106,22 @@ def _windows_worker_job():
     return job
 
 
+def _worker_failure_code(error, *, startup=False):
+    if isinstance(error, CrawlerError):
+        return error.code
+    if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+        return 'response_timeout'
+    try:
+        from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeout
+    except ImportError:
+        return 'worker_error'
+    if isinstance(error, BrowserTimeout):
+        return 'response_timeout'
+    if isinstance(error, BrowserError):
+        return 'browser_startup' if startup else 'browser_error'
+    return 'worker_error'
+
+
 def worker_main(connection, config, identity, state):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if hasattr(signal, 'SIGBREAK'):
@@ -1942,9 +2171,11 @@ def worker_main(connection, config, identity, state):
     async def run():
         nonlocal identity, job
         session = None
+        stage = 'startup.process_boundary'
         try:
             job = _windows_worker_job()
             if identity is None:
+                stage = 'startup.identity'
                 identity = await asyncio.to_thread(generate_identity, config)
                 send('profile', identity)
                 ack = await next_command()
@@ -1957,6 +2188,7 @@ def worker_main(connection, config, identity, state):
                     send(kind, value, active_command)
 
             session = BrowserSession(config, identity, state, emit_browser)
+            stage = 'startup.browser'
             await session.start()
             send('ready')
             snapshot_sequence = 0
@@ -1969,6 +2201,7 @@ def worker_main(connection, config, identity, state):
                     raise CrawlerError('ipc_invalid', '工作进程账号绑定不匹配')
                 try:
                     kind = command['type']
+                    stage = kind
                     timeout = command['timeout']
                     if kind == 'resolve':
                         value = await asyncio.wait_for(session.resolve_cities(command['value']['names']), timeout)
@@ -1978,26 +2211,28 @@ def worker_main(connection, config, identity, state):
                         value = await asyncio.wait_for(session.authenticate(command['value']['account'], timeout), timeout)
                     else:
                         raise CrawlerError('ipc_invalid', '不支持的工作进程命令')
+                    stage = 'session.snapshot'
                     snapshot = await session.snapshot()
                     snapshot_sequence += 1
                     send('session', {'identity': identity, 'state': snapshot}, command,
                          snapshot_sequence=snapshot_sequence)
                     send('result', value, command, snapshot_sequence=snapshot_sequence)
-                except (CrawlerError, asyncio.TimeoutError) as exc:
+                except Exception as exc:
                     checkpoint = getattr(session, 'auth_checkpoint', None)
                     if command.get('type') == 'auth' and checkpoint:
                         send('auth_checkpoint', checkpoint, command)
-                    if isinstance(exc, asyncio.TimeoutError):
-                        exc = CrawlerError('response_timeout', '浏览器操作超时')
-                    send('failure', command=command, code=exc.code,
-                         message=safe_message(exc), retry_after=exc.retry_after)
-                except Exception as exc:
-                    send('failure', command=command, code='browser_error', message=type(exc).__name__)
+                    failure_stage = getattr(session, 'diagnostic_stage', kind) if stage == kind else stage
+                    diagnostic = make_diagnostic(exc, stage=failure_stage, config=config, command=command)
+                    send('failure', command=command, code=_worker_failure_code(exc),
+                         message=diagnostic['message'], retry_after=getattr(exc, 'retry_after', None),
+                         diagnostic=diagnostic)
         except EOFError:
             pass
         except Exception as exc:
             try:
-                send('startup_failure', code=getattr(exc, 'code', 'browser_startup'), message=safe_message(exc))
+                diagnostic = make_diagnostic(exc, stage=stage, config=config)
+                send('startup_failure', code=_worker_failure_code(exc, startup=True),
+                     message=diagnostic['message'], diagnostic=diagnostic)
             except (OSError, EOFError):
                 pass
         finally:
@@ -2075,7 +2310,8 @@ class WorkerClient:
                     raise ValueError('message')
                 self._deliver(value)
         except (OSError, EOFError, ValueError) as exc:
-            self._deliver({'type': 'channel_closed', 'message': type(exc).__name__})
+            self._deliver({'type': 'channel_closed',
+                           'diagnostic': make_diagnostic(exc, stage='ipc.receive', config=self.config)})
 
     def _send(self):
         try:
@@ -2086,7 +2322,8 @@ class WorkerClient:
                     continue
                 self.connection.send_bytes(value)
         except (OSError, EOFError) as exc:
-            self._deliver({'type': 'channel_closed', 'message': type(exc).__name__})
+            self._deliver({'type': 'channel_closed',
+                           'diagnostic': make_diagnostic(exc, stage='ipc.send', config=self.config)})
 
     def send(self, kind, value=None, **extra):
         packet = {**self.envelope, 'type': kind, 'value': value, **extra}
@@ -2136,7 +2373,7 @@ class WorkerClient:
             if time.monotonic() >= deadline:
                 break
             if packet.get('type') == 'channel_closed':
-                raise CrawlerError('ipc_closed', '浏览器通信连接已关闭')
+                raise CrawlerError('ipc_closed', '浏览器通信连接已关闭', diagnostic=packet.get('diagnostic'))
             if any(packet.get(k) != v for k, v in self.envelope.items()):
                 raise CrawlerError('ipc_invalid', '拒绝账号或代次不匹配的消息')
             return packet
@@ -2161,7 +2398,7 @@ class WorkerClient:
             elif packet['type'] == 'ready':
                 return
             elif packet['type'] == 'startup_failure':
-                raise CrawlerError(packet['code'], packet['message'])
+                raise CrawlerError(packet['code'], packet['message'], diagnostic=packet.get('diagnostic'))
             else:
                 raise CrawlerError('ipc_invalid', '启动期间收到无效消息')
 
@@ -2204,7 +2441,8 @@ class WorkerClient:
                     raise CrawlerError('ipc_invalid', '结果引用了未持久保存的认证快照')
                 return packet['value']
             elif packet['type'] == 'failure':
-                raise CrawlerError(packet['code'], packet['message'], retry_after=packet.get('retry_after'))
+                raise CrawlerError(packet['code'], packet['message'], retry_after=packet.get('retry_after'),
+                                   diagnostic=packet.get('diagnostic'))
             else:
                 raise CrawlerError('ipc_invalid', '收到未知操作响应')
 
@@ -2257,6 +2495,15 @@ class WorkerClient:
             raise cleanup_error
 
 # ================ main ================
+class ProjectLogFormatter(logging.Formatter):
+    def __init__(self, timezone_name):
+        super().__init__('%(asctime)s %(levelname)s %(message)s')
+        self.zone = ZoneInfo(timezone_name)
+
+    def formatTime(self, record, datefmt=None):
+        return datetime.fromtimestamp(record.created, self.zone).isoformat(timespec='milliseconds')
+
+
 class Runner:
     """Sequential parent control flow; all durable changes have one owner."""
 
@@ -2277,6 +2524,83 @@ class Runner:
 
     def save(self):
         atomic_json(self.control_path, self.control)
+
+    def _record_failure(self, error, stage, task_index=None):
+        current = self.control.get('current') or {}
+        diagnostic = make_diagnostic(error, stage=stage, config=self.config)
+        self.control['last_error'] = {
+            'code': error.code, 'task_index': task_index if task_index is not None else current.get('index'),
+            'at': utc_now(), 'attempt_id': current.get('attempt_id'),
+            'worker_generation': self.generation, 'diagnostic': diagnostic,
+        }
+        self.save()
+        self.logger.warning('operation_failed index=%s attempt=%s code=%s diagnostic=%s',
+            self.control['last_error']['task_index'], current.get('attempt_count'), error.code,
+            json.dumps(diagnostic, ensure_ascii=False, separators=(',', ':')))
+
+    def _task_budget(self):
+        current = self.control.get('current') or {}
+        extra = current.get('extra_work_budget', 0.0)
+        if (isinstance(extra, bool) or not isinstance(extra, (int, float))
+                or not math.isfinite(extra) or extra < 0):
+            raise CrawlerError('state_invalid', '人工追加的任务预算无效')
+        total = self.config['task_budget'] + extra
+        if not math.isfinite(total):
+            raise CrawlerError('state_invalid', '任务累计预算超出有效范围')
+        return total
+
+    def _grant_manual_retry(self, token, reason):
+        match = re.fullmatch(r'([0-9]+):([0-9]+)', token) if isinstance(token, str) else None
+        if (match is None or not isinstance(reason, str) or not reason.strip() or len(reason) > 256):
+            raise CrawlerError('config_invalid', '人工恢复需要 TASK:ATTEMPT 和不超过256字符的非空原因')
+        try:
+            index, count = map(int, match.groups())
+        except ValueError as error:
+            raise CrawlerError('config_invalid', '人工恢复任务标识无效') from error
+        token = f'{index}:{count}'
+        current = self.control.get('current')
+        if (not isinstance(current, dict) or type(self.control.get('cursor')) is not int
+                or type(current.get('index')) is not int
+                or self.control['cursor'] != index or current['index'] != index
+                or type(current.get('attempt_count')) is not int or current['attempt_count'] != count):
+            raise CrawlerError('state_invalid', '人工恢复标识与当前任务及尝试次数不符')
+        if self.control.get('staging') is not None or self.control.get('publish_intent') is not None:
+            raise CrawlerError('state_invalid', '必须先恢复未完成的结果发布，不能同时追加任务额度')
+        maximum, used = current.get('max_attempts'), current.get('work_used')
+        if (type(maximum) is not int or maximum < 1 or count < 0
+                or isinstance(used, bool) or not isinstance(used, (int, float))
+                or not math.isfinite(used) or used < 0):
+            raise CrawlerError('state_invalid', '当前任务预算记录无效')
+        records = current.get('manual_recoveries', [])
+        if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
+            raise CrawlerError('state_invalid', '人工恢复记录格式无效')
+        if any(record.get('token') == token for record in records):
+            return False
+        budget = self._task_budget()
+        if count < maximum and used < budget:
+            raise CrawlerError('state_invalid', '当前任务仍有自动恢复额度，不能提前追加')
+        new_budget = budget + self.config['task_budget']
+        if not math.isfinite(new_budget):
+            raise CrawlerError('state_invalid', '人工追加后的累计预算超出有效范围')
+        new_maximum = maximum + max(3, len(self.config['accounts']) or 1)
+        auth = self.control.get('auth')
+        record = {'token': token, 'at': utc_now(), 'reason': safe_message(reason, config=self.config)[:256],
+                  'attempt_count': count, 'work_used': used,
+                  'auth_used': auth.get('used') if isinstance(auth, dict) else current.get('auth_used'),
+                  'old_max_attempts': maximum, 'new_max_attempts': new_maximum,
+                  'old_task_budget': budget, 'new_task_budget': new_budget}
+        candidate = copy.deepcopy(self.control)
+        candidate['current'].update(max_attempts=new_maximum,
+            extra_work_budget=current.get('extra_work_budget', 0.0) + self.config['task_budget'],
+            manual_recoveries=copy.deepcopy(records) + [record])
+        previous = self.control
+        self.control = candidate
+        try:
+            self.save()
+        except BaseException:
+            self.control = previous
+            raise
+        return True
 
     def _check_stop(self):
         if self.stop_requested:
@@ -2468,7 +2792,7 @@ class Runner:
                     if parse_utc(candidate['saved_at']) > parse_utc(saved.get('updated_at', '0001-01-01T00:00:00+00:00')):
                         state = candidate['state']
             current = self.control.get('current')
-            remaining = self.config['task_budget'] - current['work_used'] if current else self.config['startup_timeout'] * 3 - startup['used']
+            remaining = self._task_budget() - current['work_used'] if current else self.config['startup_timeout'] * 3 - startup['used']
             if remaining <= 0:
                 raise CrawlerError('task_exhausted', '浏览器恢复时间预算已耗尽')
             timeout = min(self.config['startup_timeout'], remaining)
@@ -2504,10 +2828,10 @@ class Runner:
                 if current:
                     current['work_used'] += elapsed
                 self.save()
+                self._record_failure(exc, 'worker.start')
                 self._close_worker()
                 if exc.code not in ('worker_timeout', 'worker_crashed', 'ipc_closed', 'browser_startup'):
                     raise
-                self.logger.warning('worker_start_failed generation=%s code=%s', self.generation, exc.code)
         raise CrawlerError('worker_startup_exhausted', '浏览器启动次数已耗尽，进度已保存')
 
     def _mark_account(self, state, reason, *, seconds=None):
@@ -2566,6 +2890,7 @@ class Runner:
             else:
                 self.pool.mark(self.alias, 'ready', 'authenticated', control_path=self.control_path, control=self.control)
         except CrawlerError as exc:
+            self._record_failure(exc, 'auth')
             if exc.code == 'rate_limited':
                 self._handle_site_limit(exc, allow_wait=False)
             elif exc.code in ('credentials_invalid', 'account_disabled'):
@@ -2602,11 +2927,22 @@ class Runner:
         if resume:
             self.control = read_json(self.control_path)
             saved_config = self.control.get('config')
-            runtime_overrides = {'headless', 'challenge_policy'}
+            runtime_overrides = {'headless', 'challenge_policy', 'proxy_id', 'proxy_identity_version'}
+            current_config = public_config(self.config)
+            if (isinstance(saved_config, dict) and 'comfort_timeout' not in saved_config
+                    and current_config.get('comfort_timeout') == 15.0):
+                current_config.pop('comfort_timeout')
             if (not isinstance(saved_config, dict)
                     or {key: value for key, value in saved_config.items() if key not in runtime_overrides}
-                    != {key: value for key, value in public_config(self.config).items() if key not in runtime_overrides}):
+                    != {key: value for key, value in current_config.items() if key not in runtime_overrides}):
                 raise CrawlerError('config_invalid', '初始化恢复配置与固定配置不同')
+            binding = validate_proxy_binding(saved_config, self.config['proxy'],
+                self.control.get('proxy_binding_override'),
+                refresh=getattr(self, 'refresh_proxy_credentials', False),
+                reason=getattr(self, 'recovery_reason', None))
+            if binding != self.control.get('proxy_binding_override'):
+                self.control['proxy_binding_override'] = binding
+                self.save()
         else:
             self.control = {'schema_version': SCHEMA_VERSION, 'run_id': run_id,
                 'operation_id': uuid.uuid4().hex, 'config': public_config(self.config),
@@ -2651,6 +2987,7 @@ class Runner:
                 self.control['resolve_used'] += min(timeout, time.monotonic() - began)
                 self.control['resolve_reserved'] = 0
                 self.save()
+                self._record_failure(exc, 'resolve')
                 if exc.code == 'rate_limited':
                     self._handle_site_limit(exc)
                     continue
@@ -2687,12 +3024,18 @@ class Runner:
         aliases = [a['alias'] for a in self.config['accounts']]
         if aliases != saved_config.get('account_aliases', []):
             raise CrawlerError('config_invalid', '恢复时账号池别名顺序不能改变')
-        if (stable_hash(self.config['proxy']) if self.config['proxy'] else None) != saved_config.get('proxy_id'):
-            raise CrawlerError('config_invalid', '恢复时代理配置不能静默改变')
+        binding = validate_proxy_binding(saved_config, self.config['proxy'],
+            self.control.get('proxy_binding_override'),
+            refresh=getattr(self, 'refresh_proxy_credentials', False),
+            reason=getattr(self, 'recovery_reason', None))
+        if binding != self.control.get('proxy_binding_override'):
+            self.control['proxy_binding_override'] = binding
+            self.save()
         runtime_overrides = {'headless', 'challenge_policy'}
         for key, value in saved_config.items():
             if key in self.config and key not in runtime_overrides:
                 self.config[key] = value
+        self.config['comfort_timeout'] = saved_config.get('comfort_timeout', 15.0)
         self.pool.reconcile(control=self.control, control_path=self.control_path)
         self.store.recover(self.control)
         self._recover_budgets()
@@ -2714,6 +3057,10 @@ class Runner:
             self.control['status'] = 'completed'
             self.save()
             return 0
+        self.control['status'] = 'running'
+        self.control.pop('pause_reason', None)
+        self.control.pop('pause_diagnostic', None)
+        self.save()
         self._site_gate()
         for task in iter_tasks(plan):
             if task['index'] < self.control['cursor']:
@@ -2731,14 +3078,14 @@ class Runner:
             while True:
                 self._check_stop()
                 current = self.control['current']
-                if current['attempt_count'] >= current['max_attempts'] or current['work_used'] >= self.config['task_budget']:
+                if current['attempt_count'] >= current['max_attempts'] or current['work_used'] >= self._task_budget():
                     raise CrawlerError('task_exhausted', '当前任务预算已耗尽；resume 不会重置预算')
                 self._wait_until(self.control.get('next_attempt_at'))
                 self._prepare_account()
                 self._wait_until(self.control.get('next_search_at'))
                 self._site_gate()
                 current = reserve_attempt(self.control, self.alias, self.generation,
-                                          self.config['attempt_timeout'], self.config['task_budget'])
+                                          self.config['attempt_timeout'], self._task_budget())
                 self.control['next_search_at'] = (datetime.now(timezone.utc) + timedelta(seconds=self.config['crawl_interval'])).isoformat()
                 self.save()
                 began = time.monotonic()
@@ -2763,10 +3110,7 @@ class Runner:
                             or self.control.get('staging') or self.control.get('publish_intent')):
                         raise
                     settle_attempt(self.control, time.monotonic() - began)
-                    self.control['last_error'] = {'code': exc.code, 'task_index': task['index'], 'at': utc_now()}
-                    self.save()
-                    self.logger.warning('task_failed index=%s attempt=%s code=%s', task['index'],
-                                        self.control['current']['attempt_count'], exc.code)
+                    self._record_failure(exc, 'collect', task['index'])
                     if exc.code in ('needs_auth', 'challenge') and self.alias is not None:
                         if self.config['challenge_policy'] == 'wait_then_switch':
                             try:
@@ -2790,6 +3134,8 @@ class Runner:
                         raise
                     self._close_worker()
                     count = self.control['current']['attempt_count']
+                    if count >= self.control['current']['max_attempts'] or self.control['current']['work_used'] >= self._task_budget():
+                        continue
                     delays = self.config.get('retry_delays', [5, 15])
                     delay = delays[min(count - 1, len(delays) - 1)]
                     self.control['current']['work_used'] += delay
@@ -2799,7 +3145,17 @@ class Runner:
         self.save()
         return 0
 
-    def run(self, *, resume=None, login=None):
+    def run(self, *, resume=None, login=None, retry_current=None,
+            refresh_proxy_credentials=False, recovery_reason=None):
+        action = retry_current is not None or refresh_proxy_credentials
+        if action and (not resume or login is not None):
+            raise CrawlerError('config_invalid', '人工恢复选项只能配合 --resume 使用')
+        if action and (not isinstance(recovery_reason, str) or not recovery_reason.strip() or len(recovery_reason) > 256):
+            raise CrawlerError('config_invalid', '人工恢复必须提供不超过256字符的 --recovery-reason')
+        if recovery_reason is not None and not action:
+            raise CrawlerError('config_invalid', '恢复原因必须对应一个明确的人工恢复操作')
+        self.refresh_proxy_credentials = refresh_proxy_credentials
+        self.recovery_reason = safe_message(recovery_reason, config=self.config)[:256] if action else None
         from filelock import FileLock, Timeout
         self.output.mkdir(parents=True, exist_ok=True)
         try:
@@ -2830,12 +3186,22 @@ class Runner:
                     run_id = resume or datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ_') + uuid.uuid4().hex[:8]
                     self.logger.info('run=%s output=%s', run_id, self.output)
                     plan = self._resume(run_id) if resume else self._initialize(run_id)
+                    if retry_current is not None:
+                        granted = self._grant_manual_retry(retry_current, self.recovery_reason)
+                        self.logger.warning('manual_retry token=%s granted=%s reason=%s',
+                            retry_current, granted, self.recovery_reason)
                     return self._collect_plan(plan)
                 except BaseException as exc:
                     if self.control_path and self.control_path.exists():
                         self.control['status'] = 'interrupted' if isinstance(exc, KeyboardInterrupt) else 'paused'
                         self.control['pause_reason'] = getattr(exc, 'code', type(exc).__name__)
+                        self.control['pause_diagnostic'] = make_diagnostic(exc, stage='parent.run', config=self.config)
                         self.save()
+                        current = self.control.get('current') or {}
+                        self.logger.warning('run_paused code=%s index=%s attempts=%s/%s work_used=%s/%s diagnostic=%s',
+                            self.control['pause_reason'], current.get('index'), current.get('attempt_count'),
+                            current.get('max_attempts'), current.get('work_used'), self._task_budget(),
+                            json.dumps(self.control['pause_diagnostic'], ensure_ascii=False, separators=(',', ':')))
                     raise
                 finally:
                     self._close_worker()
@@ -2879,6 +3245,7 @@ def _resume_cli_config(config, run_id, output):
         if key in config and key not in ('accounts', 'proxy', 'output'):
             config[key] = copy.deepcopy(value)
     config['accounts'] = accounts
+    config['comfort_timeout'] = frozen.get('comfort_timeout', 15.0)
     return config
 
 
@@ -2889,6 +3256,11 @@ def command_line(argv=None):
     operation.add_argument('--resume', metavar='RUN_ID')
     operation.add_argument('--login', metavar='ALIAS')
     operation.add_argument('--check-environment', action='store_true')
+    parser.add_argument('--retry-current', metavar='TASK:ATTEMPT',
+                        help='随 --resume 为已耗尽的指定当前任务追加一轮有限额度')
+    parser.add_argument('--refresh-proxy-credentials', action='store_true',
+                        help='随 --resume 显式迁移旧批次代理凭据绑定；须确认连接配置未变')
+    parser.add_argument('--recovery-reason', metavar='TEXT', help='人工恢复原因，必填且不超过256字符')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--cities', nargs='+', metavar='CITY')
     parser.add_argument('--begin-date')
@@ -2936,7 +3308,7 @@ def command_line(argv=None):
     output.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger('ctrip')
     logger.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    formatter = ProjectLogFormatter(config['timezone'])
     console = logging.StreamHandler()
     console.setFormatter(formatter)
     rotating = logging.handlers.RotatingFileHandler(output / 'crawler.log', maxBytes=10 * 1024 * 1024,
@@ -2957,7 +3329,9 @@ def command_line(argv=None):
 
     previous = signal.signal(signal.SIGINT, stop)
     try:
-        result = runner.run(resume=args.resume, login=args.login)
+        result = runner.run(resume=args.resume, login=args.login, retry_current=args.retry_current,
+                            refresh_proxy_credentials=args.refresh_proxy_credentials,
+                            recovery_reason=args.recovery_reason)
         logger.info('finished status=%s stats=%s', result, runner.control.get('stats', {}))
         return result
     finally:
@@ -2983,7 +3357,9 @@ def main(argv=None):
             return 4
         return 1
     except Exception as exc:
-        print('unexpected_error: ' + type(exc).__name__, file=sys.stderr)
+        diagnostic = make_diagnostic(exc, stage='cli', config=DEFAULT_CONFIG)
+        print('unexpected_error: ' + json.dumps(diagnostic, ensure_ascii=False, separators=(',', ':')),
+              file=sys.stderr)
         return 4
 
 

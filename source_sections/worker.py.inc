@@ -105,6 +105,22 @@ def _windows_worker_job():
     return job
 
 
+def _worker_failure_code(error, *, startup=False):
+    if isinstance(error, CrawlerError):
+        return error.code
+    if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+        return 'response_timeout'
+    try:
+        from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeout
+    except ImportError:
+        return 'worker_error'
+    if isinstance(error, BrowserTimeout):
+        return 'response_timeout'
+    if isinstance(error, BrowserError):
+        return 'browser_startup' if startup else 'browser_error'
+    return 'worker_error'
+
+
 def worker_main(connection, config, identity, state):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if hasattr(signal, 'SIGBREAK'):
@@ -154,9 +170,11 @@ def worker_main(connection, config, identity, state):
     async def run():
         nonlocal identity, job
         session = None
+        stage = 'startup.process_boundary'
         try:
             job = _windows_worker_job()
             if identity is None:
+                stage = 'startup.identity'
                 identity = await asyncio.to_thread(generate_identity, config)
                 send('profile', identity)
                 ack = await next_command()
@@ -169,6 +187,7 @@ def worker_main(connection, config, identity, state):
                     send(kind, value, active_command)
 
             session = BrowserSession(config, identity, state, emit_browser)
+            stage = 'startup.browser'
             await session.start()
             send('ready')
             snapshot_sequence = 0
@@ -181,6 +200,7 @@ def worker_main(connection, config, identity, state):
                     raise CrawlerError('ipc_invalid', '工作进程账号绑定不匹配')
                 try:
                     kind = command['type']
+                    stage = kind
                     timeout = command['timeout']
                     if kind == 'resolve':
                         value = await asyncio.wait_for(session.resolve_cities(command['value']['names']), timeout)
@@ -190,26 +210,28 @@ def worker_main(connection, config, identity, state):
                         value = await asyncio.wait_for(session.authenticate(command['value']['account'], timeout), timeout)
                     else:
                         raise CrawlerError('ipc_invalid', '不支持的工作进程命令')
+                    stage = 'session.snapshot'
                     snapshot = await session.snapshot()
                     snapshot_sequence += 1
                     send('session', {'identity': identity, 'state': snapshot}, command,
                          snapshot_sequence=snapshot_sequence)
                     send('result', value, command, snapshot_sequence=snapshot_sequence)
-                except (CrawlerError, asyncio.TimeoutError) as exc:
+                except Exception as exc:
                     checkpoint = getattr(session, 'auth_checkpoint', None)
                     if command.get('type') == 'auth' and checkpoint:
                         send('auth_checkpoint', checkpoint, command)
-                    if isinstance(exc, asyncio.TimeoutError):
-                        exc = CrawlerError('response_timeout', '浏览器操作超时')
-                    send('failure', command=command, code=exc.code,
-                         message=safe_message(exc), retry_after=exc.retry_after)
-                except Exception as exc:
-                    send('failure', command=command, code='browser_error', message=type(exc).__name__)
+                    failure_stage = getattr(session, 'diagnostic_stage', kind) if stage == kind else stage
+                    diagnostic = make_diagnostic(exc, stage=failure_stage, config=config, command=command)
+                    send('failure', command=command, code=_worker_failure_code(exc),
+                         message=diagnostic['message'], retry_after=getattr(exc, 'retry_after', None),
+                         diagnostic=diagnostic)
         except EOFError:
             pass
         except Exception as exc:
             try:
-                send('startup_failure', code=getattr(exc, 'code', 'browser_startup'), message=safe_message(exc))
+                diagnostic = make_diagnostic(exc, stage=stage, config=config)
+                send('startup_failure', code=_worker_failure_code(exc, startup=True),
+                     message=diagnostic['message'], diagnostic=diagnostic)
             except (OSError, EOFError):
                 pass
         finally:
@@ -287,7 +309,8 @@ class WorkerClient:
                     raise ValueError('message')
                 self._deliver(value)
         except (OSError, EOFError, ValueError) as exc:
-            self._deliver({'type': 'channel_closed', 'message': type(exc).__name__})
+            self._deliver({'type': 'channel_closed',
+                           'diagnostic': make_diagnostic(exc, stage='ipc.receive', config=self.config)})
 
     def _send(self):
         try:
@@ -298,7 +321,8 @@ class WorkerClient:
                     continue
                 self.connection.send_bytes(value)
         except (OSError, EOFError) as exc:
-            self._deliver({'type': 'channel_closed', 'message': type(exc).__name__})
+            self._deliver({'type': 'channel_closed',
+                           'diagnostic': make_diagnostic(exc, stage='ipc.send', config=self.config)})
 
     def send(self, kind, value=None, **extra):
         packet = {**self.envelope, 'type': kind, 'value': value, **extra}
@@ -348,7 +372,7 @@ class WorkerClient:
             if time.monotonic() >= deadline:
                 break
             if packet.get('type') == 'channel_closed':
-                raise CrawlerError('ipc_closed', '浏览器通信连接已关闭')
+                raise CrawlerError('ipc_closed', '浏览器通信连接已关闭', diagnostic=packet.get('diagnostic'))
             if any(packet.get(k) != v for k, v in self.envelope.items()):
                 raise CrawlerError('ipc_invalid', '拒绝账号或代次不匹配的消息')
             return packet
@@ -373,7 +397,7 @@ class WorkerClient:
             elif packet['type'] == 'ready':
                 return
             elif packet['type'] == 'startup_failure':
-                raise CrawlerError(packet['code'], packet['message'])
+                raise CrawlerError(packet['code'], packet['message'], diagnostic=packet.get('diagnostic'))
             else:
                 raise CrawlerError('ipc_invalid', '启动期间收到无效消息')
 
@@ -416,7 +440,8 @@ class WorkerClient:
                     raise CrawlerError('ipc_invalid', '结果引用了未持久保存的认证快照')
                 return packet['value']
             elif packet['type'] == 'failure':
-                raise CrawlerError(packet['code'], packet['message'], retry_after=packet.get('retry_after'))
+                raise CrawlerError(packet['code'], packet['message'], retry_after=packet.get('retry_after'),
+                                   diagnostic=packet.get('diagnostic'))
             else:
                 raise CrawlerError('ipc_invalid', '收到未知操作响应')
 

@@ -242,6 +242,7 @@ class FileStore:
                           comfort_status=observation.get('comfort_status', 'disabled'),
                           comfort_reason=observation.get('comfort_reason'),
                           price_status=observation['price_status'], price_reason=observation['price_reason'],
+                          manual_recoveries=_files_copy.deepcopy(current.get('manual_recoveries')),
                           account_alias=task.get('account_alias'), binding_epoch=task.get('binding_epoch'))
             progress['publish_intent'] = intent
             self.save_progress(progress)
@@ -254,6 +255,8 @@ class FileStore:
 
     def _finish_publication(self, progress):
         intent = progress['publish_intent']
+        if intent.get('manual_recoveries') != (progress.get('current') or {}).get('manual_recoveries'):
+            _files_fail('Manual recovery evidence differs from the current task')
         temporary, target = self._check_stage(intent, progress)
         meta_path = target.with_suffix('.meta.json')
         if target.exists():
@@ -269,7 +272,8 @@ class FileStore:
         if meta_path.exists():
             receipt = read_json(meta_path)
             for key in ('run_id', 'task_index', 'task_key', 'attempt_id', 'result_id', 'sha256', 'row_count',
-                        'target_path', 'comfort_status', 'comfort_reason', 'price_status', 'price_reason'):
+                        'target_path', 'comfort_status', 'comfort_reason', 'price_status', 'price_reason',
+                        'manual_recoveries'):
                 if receipt.get(key) != intent.get(key):
                     _files_fail('Receipt differs from current publication')
         else:
