@@ -1,5 +1,6 @@
 """Task-bound request capture and stable browser identity contracts."""
 import copy
+import asyncio
 import importlib.util
 import os
 import sys
@@ -437,20 +438,24 @@ class CollectBoundaryContractTests(unittest.IsolatedAsyncioTestCase):
         read_bodies=self.read_bodies
         detail_ui_calls=self.detail_ui_calls
         class Request:
-            def __init__(self, payload, method):
-                self.post_data_json=payload;self.method=method
+            def __init__(self, payload, method, url):
+                self.post_data_json=payload;self.method=method;self.url=url
         class Response:
             def __init__(self, path, payload, status, response_payload, method='POST'):
-                self.url='https://flights.ctrip.com'+path;self.request=Request(payload,method)
+                self.url='https://flights.ctrip.com'+path;self.request=Request(payload,method,self.url)
                 self.status=status;self.headers={};self.payload=response_payload
             async def body(self):
                 read_bodies.append(self.url)
                 return json.dumps(self.payload).encode()
         class Page:
-            def on(self, kind, callback):self.callback=callback
+            def __init__(self):self.callbacks={}
+            def on(self, kind, callback):self.callbacks[kind]=callback
             def remove_listener(self,*args):pass
             async def goto(self,*args,**kwargs):
-                for args in responses:self.callback(Response(*args))
+                for args in responses:
+                    response=Response(*args)
+                    self.callbacks['request'](response.request)
+                    self.callbacks['response'](response)
             def locator(self,*args):
                 detail_ui_calls.append(args)
                 raise AssertionError('This fixture must not trigger detail UI')
@@ -459,7 +464,7 @@ class CollectBoundaryContractTests(unittest.IsolatedAsyncioTestCase):
             async def new_page(self):return Page()
         session=module.BrowserSession(config or {}, {}, {}, None);session.context=Context()
         if capture_comfort:
-            async def collect_comfort(page, task, rows, queue, deadline, errors):
+            async def collect_comfort(page, task, rows, queue, deadline, errors, traffic):
                 self.comfort_window=deadline-module.time.monotonic()
                 return module.apply_comfort(rows,[])
             session._collect_comfort=collect_comfort
@@ -526,11 +531,80 @@ class CollectBoundaryContractTests(unittest.IsolatedAsyncioTestCase):
 
 
 @unittest.skipUnless(os.getenv('CTRIP_BROWSER_TESTS') == '1', 'Requires the explicitly installed Camoufox runtime')
+class NavigationDOMContractTests(unittest.IsolatedAsyncioTestCase):
+    async def local_session(self, *, refusal=None):
+        from test_processing import itinerary
+        temporary,module=load_browser()
+        session=module.BrowserSession({'headless':True,'navigation_timeout':1},
+                                      module.generate_identity({'headless':True}),{},None)
+        await session.start()
+        release=asyncio.Event();before_close=[]
+        complete={'status':0,'data':{'context':{'searchId':'done','finished':True},'flightItineraryList':[itinerary()]}}
+        html='''<!doctype html><html data-fixture-dcl="no"><script>
+            document.addEventListener('DOMContentLoaded',()=>document.documentElement.dataset.fixtureDcl='yes');
+            fetch('/international/search/api/search/batchSearch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(QUERY)});
+            </script><script defer src="/blocked-defer.js"></script><body>Local fixture</body></html>'''.replace('QUERY',json.dumps(body()))
+        await session.context.route('**/*',lambda route:route.fulfill(content_type='text/html',body='Local fixture'))
+        async def navigation(route):
+            if refusal=='abort':await route.abort('failed')
+            else:await route.fulfill(status=refusal or 200,content_type='text/html',body=html if not refusal else 'Denied')
+        await session.context.route('https://flights.ctrip.com/online/list/**',navigation)
+        await session.context.route('**/batchSearch',lambda route:route.fulfill(content_type='application/json',body=json.dumps(complete)))
+        async def deferred(route):
+            await release.wait()
+            await route.fulfill(content_type='application/javascript',body='')
+        await session.context.route('**/blocked-defer.js',deferred)
+        new_page=session.context.new_page
+        async def instrumented_page():
+            page=await new_page();close=page.close
+            async def close_fixture():
+                before_close.append(await page.locator('html').get_attribute('data-fixture-dcl'))
+                release.set()
+                await close()
+            page.close=close_fixture
+            return page
+        session.context.new_page=instrumented_page
+        return temporary,module,session,release,before_close
+
+    async def test_valid_search_can_complete_while_domcontentloaded_is_blocked(self):
+        temporary,module,session,release,before_close=await self.local_session()
+        try:
+            result=await session.collect(task(),12)
+            self.assertEqual(result['status'],'succeeded')
+            self.assertEqual(len(result['rows']),1)
+            self.assertEqual(before_close,['no'])
+        finally:
+            release.set();await session.close();temporary.cleanup()
+
+    async def test_real_navigation_abort_is_not_suppressed(self):
+        from playwright.async_api import Error as BrowserError
+        temporary,module,session,release,before_close=await self.local_session(refusal='abort')
+        try:
+            with self.assertRaises(BrowserError) as error:
+                await session.collect(task(),12)
+            self.assertEqual(error.exception.diagnostic['network']['response_kind'],'navigation')
+            self.assertTrue(error.exception.diagnostic['network']['request_failed'])
+        finally:
+            release.set();await session.close();temporary.cleanup()
+
+    async def test_http_navigation_refusal_is_reported_without_waiting_for_search(self):
+        temporary,module,session,release,before_close=await self.local_session(refusal=403)
+        try:
+            with self.assertRaises(module.CrawlerError) as error:
+                await session.collect(task(),12)
+            self.assertEqual(error.exception.code,'site_blocked')
+            self.assertEqual(error.exception.diagnostic['network']['http_status'],403)
+        finally:
+            release.set();await session.close();temporary.cleanup()
+
+
+@unittest.skipUnless(os.getenv('CTRIP_BROWSER_TESTS') == '1', 'Requires the explicitly installed Camoufox runtime')
 class ComfortDOMContractTests(unittest.IsolatedAsyncioTestCase):
-    async def local_session(self, *, failed_detail=False, early_detail=False, lazy=False, rate_limited=False):
+    async def local_session(self, *, failed_detail=False, early_detail=False, lazy=False, rate_limited=False,
+                            detail_delay=0, missing_bridge=False, failed_request=False):
         from test_processing import itinerary,ProcessingContractTests
         temporary,module=load_browser()
-        session=module.BrowserSession({'headless':True,'comft_flight':True,'action_timeout':1},
+        session=module.BrowserSession({'headless':True,'comft_flight':True,'action_timeout':1,'comfort_timeout':3},
                                       module.generate_identity({'headless':True}),{},None)
         await session.start()
         requests=[]
@@ -560,9 +634,17 @@ class ComfortDOMContractTests(unittest.IsolatedAsyncioTestCase):
         await session.context.route('**/batchSearch',lambda route:route.fulfill(content_type='application/json',body=json.dumps(complete)))
         async def detail(route):
             requests.append(route.request.post_data_json)
+            if failed_request:
+                await route.abort('failed')
+                return
+            if detail_delay:
+                await asyncio.sleep(detail_delay)
+            payload=ProcessingContractTests().comfort_response()['payload']
+            if missing_bridge:
+                del payload['data']['punctualityInfo']['departureBridge']
             await route.fulfill(status=429 if rate_limited else (503 if failed_detail else 200),
                 headers={'Retry-After':'3600'} if rate_limited else {},content_type='application/json',
-                body=json.dumps({'status':1} if failed_detail else ProcessingContractTests().comfort_response()['payload']))
+                body=json.dumps({'status':1} if failed_detail else payload))
         await session.context.route('**/getFlightComfort',detail)
         return temporary,module,session,requests
 
@@ -574,6 +656,9 @@ class ComfortDOMContractTests(unittest.IsolatedAsyncioTestCase):
                 result=await session.collect(task(),30)
                 self.assertEqual(result['comfort_status'],'complete')
                 self.assertEqual(result['status'],'succeeded')
+                summary=result['comfort_summary']
+                self.assertEqual((summary['result_flights'],summary['requested_flights'],summary['responded_flights']), (1,1,1))
+                self.assertEqual((summary['requests_sent'],summary['responses_received'],summary['covered_flights']), (1,1,1))
             self.assertEqual([r['flightNoList'] for r in requests],[['FM4567'],['FM4567']])
         finally:
             await session.close();temporary.cleanup()
@@ -605,6 +690,72 @@ class ComfortDOMContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(error.exception.code,'rate_limited')
             self.assertEqual(error.exception.retry_after,3600)
             self.assertEqual(len(requests),1)
+        finally:
+            await session.close();temporary.cleanup()
+
+    async def test_late_inflight_response_is_consumed_before_the_comfort_deadline(self):
+        temporary,module,session,requests=await self.local_session(detail_delay=1.8)
+        try:
+            result=await session.collect(task(),30)
+            self.assertEqual(result['comfort_status'],'complete')
+            self.assertEqual(result['comfort_summary']['covered_rows'],1)
+            self.assertEqual(len(requests),1)
+        finally:
+            await session.close();temporary.cleanup()
+
+    async def test_all_responses_with_missing_source_fields_finish_without_waiting_full_budget(self):
+        temporary,module,session,requests=await self.local_session(missing_bridge=True)
+        session.config['comfort_timeout']=10
+        try:
+            result=await asyncio.wait_for(session.collect(task(),30),4)
+            self.assertEqual(result['comfort_status'],'partial')
+            self.assertEqual(result['comfort_reason'],'source_missing')
+            self.assertEqual(result['comfort_summary']['missing_fields'],{'departure_bridge_rate':1})
+            self.assertEqual(result['comfort_summary']['responded_flights'],1)
+        finally:
+            await session.close();temporary.cleanup()
+
+    async def test_failed_native_request_is_counted_without_waiting_for_a_response(self):
+        temporary,module,session,requests=await self.local_session(failed_request=True)
+        try:
+            result=await asyncio.wait_for(session.collect(task(),30),4)
+            self.assertEqual(result['comfort_status'],'unavailable')
+            summary=result['comfort_summary']
+            self.assertEqual((summary['requests_sent'],summary['responses_received'],summary['covered_flights']), (1,0,0))
+            self.assertIn('network_error',result['comfort_reason'])
+        finally:
+            await session.close();temporary.cleanup()
+
+    async def test_a_failed_hover_does_not_mark_the_flight_as_already_triggered(self):
+        from playwright.async_api import TimeoutError as BrowserTimeout
+        temporary,module,session,requests=await self.local_session()
+        new_page=session.context.new_page
+        failures=[]
+        async def page_with_transient_hover():
+            page=await new_page();locator=page.locator
+            def wrapped_locator(selector):
+                group=locator(selector)
+                if selector=='.flight-item .plane-No':
+                    nth=group.nth
+                    def wrapped_nth(index):
+                        item=nth(index);hover=item.hover
+                        async def hover_with_one_failure(**kwargs):
+                            if index==1 and not failures:
+                                failures.append(True)
+                                raise BrowserTimeout('Local transient hover failure')
+                            return await hover(**kwargs)
+                        item.hover=hover_with_one_failure
+                        return item
+                    group.nth=wrapped_nth
+                return group
+            page.locator=wrapped_locator
+            return page
+        session.context.new_page=page_with_transient_hover
+        try:
+            result=await session.collect(task(),30)
+            self.assertEqual(result['comfort_status'],'complete')
+            self.assertEqual(len(requests),1)
+            self.assertEqual(len(failures),1)
         finally:
             await session.close();temporary.cleanup()
 

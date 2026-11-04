@@ -1,0 +1,32 @@
+# Optional deployment template. Adjust paths, account and fixed batch ID first.
+# The Python distribution remains independently runnable without this file.
+[Unit]
+Description=Ctrip flight collection for one fixed batch
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=12
+
+[Service]
+Type=simple
+User=ctrip
+Group=ctrip
+WorkingDirectory=/opt/ctrip-crawler
+StateDirectory=ctrip-crawler
+UMask=0077
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/ctrip-crawler/.venv/bin/python /opt/ctrip-crawler/ctrip_flights_scraper.py --output /var/lib/ctrip-crawler/data --run-id batch-001
+Restart=on-failure
+RestartPreventExitStatus=2 3 4 130
+RestartForceExitStatus=SIGTERM SIGHUP
+RestartSec=30
+KillMode=mixed
+# Covers the default longest operation (900 seconds) and bounded cleanup.
+# Increase this if application operation/cleanup timeouts are increased.
+TimeoutStopSec=960
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ctrip-crawler
+
+[Install]
+WantedBy=multi-user.target

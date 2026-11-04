@@ -157,7 +157,8 @@ def main():
         return real_client(config, identity, state, target=fixture_worker, **kwargs)
 
     app.WorkerClient = fixture_client
-    app.DEFAULT_CONFIG.update(crawl_interval=0.0, retry_delays=[0, 0], disk_reserve_mb=0, comft_flight=False)
+    app.DEFAULT_CONFIG.update(crawl_interval=0.0, retry_delays=[0, 0], disk_reserve_mb=0,
+                              comft_flight=False, auto_recovery_rounds=0)
     data = output / 'data'
     began = time.monotonic()
     report = {'kind': 'controlled-site-incident-recovery-real-browser', 'status': 'running',
@@ -190,7 +191,7 @@ def main():
         original_hashes = {original_csv: digest(original_csv), original_receipt: digest(original_receipt)}
 
         phase('browser_error')
-        assert invoke('one-resume-two-browser-errors-exhausted', ['--resume', run_id]) == 1
+        assert invoke('one-resume-two-browser-errors-exhausted', ['--resume', run_id]) == 3
         exhausted = app.read_json(progress_path)
         assert exhausted['cursor'] == 1 and exhausted['stats']['succeeded'] == 1
         assert exhausted['current']['attempt_count'] == exhausted['current']['max_attempts'] == 3
@@ -201,7 +202,7 @@ def main():
         assert not exhausted['current'].get('manual_recoveries')
         assert sum(item['kind'] == 'navigation_abort' for item in read_events(output / 'events.jsonl')) == 2
         workers = sum(item['kind'] == 'worker_created' for item in read_events(output / 'events.jsonl'))
-        assert invoke('ordinary-resume-cannot-reset-exhausted-budget', ['--resume', run_id]) == 1
+        assert invoke('ordinary-resume-cannot-reset-exhausted-budget', ['--resume', run_id]) == 3
         assert sum(item['kind'] == 'worker_created' for item in read_events(output / 'events.jsonl')) == workers
         assert app.read_json(progress_path)['current'] == exhausted['current']
 

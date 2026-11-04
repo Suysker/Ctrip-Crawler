@@ -46,7 +46,7 @@ from urllib.parse import urlparse, urlencode
 from zoneinfo import ZoneInfo
 
 SCHEMA_VERSION = 1
-VERSION = '4.0.0'
+VERSION = '4.1.0'
 BROWSER_BUILD = 'official/152.0.4-beta.29'
 RUNTIME_REQUIREMENTS = {
     'camoufox': '0.5.8', 'playwright': '1.60.0', 'fpgen': '1.3.0',
@@ -136,6 +136,13 @@ def safe_message(error, config=None, command=None):
     return _diagnostic_text(error, _diagnostic_secrets(config, command))
 
 
+def firefox_error_code(error):
+    """Read Firefox's error symbol, never infer it from prose or a URL."""
+    first_line = str(error).split('\n', 1)[0]
+    match = re.match(r'^\s*(?:[A-Za-z_][A-Za-z0-9_.]*:\s*)?(NS_ERROR_[A-Z0-9_]{1,64})(?:\s|$)', first_line)
+    return match.group(1) if match else None
+
+
 def make_diagnostic(error, *, stage=None, config=None, command=None):
     """One bounded diagnostic schema for local errors and worker failures."""
     secrets = _diagnostic_secrets(config, command)
@@ -173,6 +180,26 @@ def make_diagnostic(error, *, stage=None, config=None, command=None):
             if protocol.get(key) in ('missing', 'NoneType', 'bool', 'dict', 'list', 'int', 'str', 'float'):
                 summary[key] = protocol[key]
         result['protocol'] = summary
+    network = supplied.get('network')
+    network = network if isinstance(network, dict) else {}
+    summary = {}
+    symbol = network.get('browser_error_code') or firefox_error_code(error)
+    if isinstance(symbol, str) and firefox_error_code(symbol) == symbol:
+        summary['browser_error_code'] = _diagnostic_text(symbol, secrets, 80)
+    if network.get('response_kind') in ('navigation', 'search', 'comfort', 'resolve', 'auth'):
+        summary['response_kind'] = network['response_kind']
+    if network.get('method') in ('GET', 'POST'):
+        summary['method'] = network['method']
+    for key in ('http_status', 'failed_request_count', 'search_responses_received'):
+        value = network.get(key)
+        if type(value) is int and 0 <= value < 10 ** 12:
+            summary[key] = value
+        elif key == 'http_status' and key in network and value is None:
+            summary[key] = None
+    if type(network.get('request_failed')) is bool:
+        summary['request_failed'] = network['request_failed']
+    if summary:
+        result['network'] = summary
     causes = []
     if isinstance(supplied.get('causes'), list):
         for cause in supplied['causes'][:3]:

@@ -382,6 +382,55 @@ class ProcessingContractTests(unittest.TestCase):
         self.assertEqual(result["rows"][0]["comfort_status"], "complete")
         missing = self.module.apply_comfort(rows, [self.comfort_response("MU1234")])
         self.assertEqual(missing["comfort_status"], "unavailable")
+
+    def test_comfort_distinguishes_response_coverage_from_missing_source_fields(self):
+        rows = self.normalize([itinerary('one'), itinerary('two', number='MU4321'),
+                               itinerary('three', number='MU9999')], comft_flight=True)['rows']
+        rows[2]['实际承运航班号'] = 'FM9999'
+        response = self.comfort_response()
+        del response['payload']['data']['punctualityInfo']['departureBridge']
+        result = self.module.apply_comfort(rows, [response])
+        summary = result['comfort_summary']
+        self.assertEqual((summary['result_flights'], summary['covered_flights'], summary['covered_rows']), (2, 1, 2))
+        self.assertEqual((summary['complete_rows'], summary['partial_rows'], summary['unavailable_rows']), (0, 2, 1))
+        self.assertEqual(summary['missing_fields'], {'departure_bridge_rate': 2})
+        self.assertIn('source_missing', result['comfort_reason'])
+        self.assertIn('response_coverage_incomplete', result['comfort_reason'])
+
+    def test_blank_required_source_values_are_not_complete_but_raw_false_is_preserved(self):
+        rows = self.normalize([itinerary()], comft_flight=True)['rows']
+        response = self.comfort_response()
+        response['payload']['data']['punctualityInfo']['departureBridge'] = ''
+        cabin = response['payload']['data']['cabinInfoList'][0]
+        cabin['mealMsg'] = '  '
+        cabin['seatWidth']['value'] = ''
+        result = self.module.apply_comfort(rows, [response])
+        self.assertEqual(result['comfort_status'], 'partial')
+        self.assertIs(result['rows'][0]['经济舱餐食标记（原值）'], False)
+        self.assertEqual(result['comfort_summary']['missing_fields'],
+                         {'departure_bridge_rate': 1, 'Y_meal_msg': 1, 'Y_seat_width': 1})
+
+    def test_comfort_response_with_empty_values_is_covered_and_explicitly_unavailable(self):
+        rows = self.normalize([itinerary()], comft_flight=True)['rows']
+        response = {'flight_no': 'FM4567', 'payload': {'status': 0, 'msg': 'success',
+                    'data': {'punctualityInfo': {}, 'planeInfo': {}, 'cabinInfoList': []}}}
+        result = self.module.apply_comfort(rows, [response])
+        self.assertEqual(result['comfort_status'], 'unavailable')
+        summary = result['comfort_summary']
+        self.assertEqual((summary['covered_flights'], summary['covered_rows'], summary['unavailable_rows']), (1, 1, 1))
+        self.assertEqual(sum(summary['missing_fields'].values()), 10)
+        self.assertEqual(result['comfort_reason'], 'source_missing')
+
+    def test_comfort_enriches_same_flight_cabins_without_erasing_prior_valid_fields(self):
+        rows = self.normalize([itinerary(prices=[quote(), quote('300', '30', cabin='C')])], comft_flight=True)['rows']
+        business = {'flight_no': 'FM4567', 'payload': {'status': 0, 'msg': 'success', 'data': {
+            'punctualityInfo': {}, 'planeInfo': {}, 'cabinInfoList': [{'cabin': 'C', 'mealMsg': '有餐食',
+            'seatTilt': {'value': '120°'}, 'seatWidth': {'value': '60cm'}, 'seatPitch': {'value': '100cm'}}]}}}
+        result = self.module.apply_comfort(rows, [self.comfort_response(), business])
+        self.assertEqual(result['comfort_status'], 'complete')
+        self.assertEqual(result['rows'][0]['经济舱座椅间距'], '76cm')
+        self.assertEqual(result['rows'][0]['商务舱座椅间距'], '100cm')
+        self.assertEqual(result['comfort_summary']['missing_fields'], {})
         self.assertEqual(self.module.apply_comfort([], [])["comfort_status"], "not_applicable")
 
 

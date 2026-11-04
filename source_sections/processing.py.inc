@@ -273,6 +273,11 @@ def normalize_response(payload: dict, task: dict, options: dict, observed_at: st
             "price_reason": sorted(price_reasons)}
 
 
+def _processing_comfort_value(value):
+    return (isinstance(value, (str, int, float, bool))
+            and (not isinstance(value, str) or bool(value.strip())))
+
+
 def _processing_comfort_data(payload):
     if (not isinstance(payload, dict) or type(payload.get("status")) is not int
             or payload["status"] != 0 or payload.get("msg") != "success"):
@@ -289,7 +294,7 @@ def _processing_comfort_data(payload):
         (plane, {"planeTypeName": "飞机类型", "planeWidthCategory": "飞机宽度", "planeAge": "飞机机龄"}),
     ):
         for key, label in mapping.items():
-            if key in source and source[key] is not None and isinstance(source[key], (str, int, float, bool)):
+            if _processing_comfort_value(source.get(key)):
                 values[label] = source[key]
     for cabin in cabins:
         if not isinstance(cabin, dict) or cabin.get("cabin") not in ("Y", "C"):
@@ -298,11 +303,11 @@ def _processing_comfort_data(payload):
         fields = {"hasMeal": "餐食标记（原值）", "mealMsg": "餐食信息", "power": "电源"}
         for key, label in fields.items():
             value = cabin.get(key)
-            if value is not None and isinstance(value, (str, int, float, bool)):
+            if _processing_comfort_value(value):
                 values[name + label] = value
         for key, label in (("seatTilt", "座椅倾斜度"), ("seatWidth", "座椅宽度"), ("seatPitch", "座椅间距")):
             seat = cabin.get(key)
-            if isinstance(seat, dict) and seat.get("value") is not None and isinstance(seat["value"], (str, int, float, bool)):
+            if isinstance(seat, dict) and _processing_comfort_value(seat.get("value")):
                 value = seat["value"]
                 # The source page displays these numeric sentinel values as unknown.
                 if isinstance(value, (int, float)) and (value == 0 if key == "seatTilt" else -0.5 <= value < 0.5):
@@ -313,17 +318,18 @@ def _processing_comfort_data(payload):
 
 def apply_comfort(rows, responses):
     """Attach known comfort responses by operating flight, preserving quotes."""
-    if not rows:
-        return {"rows": [], "comfort_status": "not_applicable"}
     by_flight = {}
     for response in responses:
         if not isinstance(response, dict) or not isinstance(response.get("flight_no"), str):
             continue
         values = _processing_comfort_data(response.get("payload"))
-        if values:
-            by_flight[response["flight_no"]] = values
+        if values is not None:
+            by_flight.setdefault(response["flight_no"], {}).update(values)
     result = []
     statuses = []
+    targets, covered = set(), set()
+    covered_rows = 0
+    missing_fields = {}
     common = {"出发延误时间", "出发廊桥率", "到达延误时间", "飞机类型", "飞机宽度", "飞机机龄"}
     for original in rows:
         row = dict(original)
@@ -333,18 +339,34 @@ def apply_comfort(rows, responses):
             return CSV_INTERNAL_NAMES[label] if english else label
 
         number = row.get(column("实际承运航班号")) or row.get(column("航班号"))
+        targets.add(number)
         values = by_flight.get(number, {})
         required = set(common)
         for prefix, name in (("economy", "经济舱"), ("bussiness", "商务舱")):
             if row.get(prefix + "_origin") not in (None, ""):
                 required.update(name + suffix for suffix in ("餐食信息", "座椅倾斜度", "座椅宽度", "座椅间距"))
         status = "complete" if required.issubset(values) else ("partial" if values else "unavailable")
+        if number in by_flight:
+            covered.add(number)
+            covered_rows += 1
+            for label in required - values.keys():
+                field = CSV_INTERNAL_NAMES[label]
+                missing_fields[field] = missing_fields.get(field, 0) + 1
         for label, value in values.items():
             row[column(label)] = value
         row[column("舒适度状态")] = status
         result.append(row)
         statuses.append(status)
-    status = "complete" if all(item == "complete" for item in statuses) else (
+    status = "not_applicable" if not rows else "complete" if all(item == "complete" for item in statuses) else (
         "unavailable" if all(item == "unavailable" for item in statuses) else "partial")
+    reasons = []
+    if covered_rows < len(rows):
+        reasons.append("response_coverage_incomplete")
+    if missing_fields:
+        reasons.append("source_missing")
     return {"rows": result, "comfort_status": status,
-            "comfort_reason": None if status == "complete" else "missing_or_incomplete_comfort_response"}
+            "comfort_reason": ";".join(reasons) or None,
+            "comfort_summary": {"result_flights": len(targets), "covered_flights": len(covered),
+                                "covered_rows": covered_rows, "complete_rows": statuses.count("complete"),
+                                "partial_rows": statuses.count("partial"), "unavailable_rows": statuses.count("unavailable"),
+                                "missing_fields": dict(sorted(missing_fields.items()))}}

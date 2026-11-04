@@ -15,7 +15,7 @@ def config(app, tmp_path, accounts=None):
     return dict(app.DEFAULT_CONFIG, output=str(tmp_path), accounts=accounts or [],
                 login_allowed=bool(accounts), crawl_citys=['上海', '香港'],
                 begin_date='2099-01-01', crawl_days=1, crawl_interval=0,
-                retry_delays=[0, 0], disk_reserve_mb=0)
+                retry_delays=[0, 0], disk_reserve_mb=0, auto_recovery_rounds=0)
 
 
 def test_finished_resume_does_not_create_browser(tmp_path):

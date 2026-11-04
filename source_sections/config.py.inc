@@ -22,6 +22,8 @@ DEFAULT_CONFIG = {
     'attempt_timeout': 90.0,
     'comfort_timeout': 15.0,
     'task_budget': 300.0,
+    'auto_recovery_rounds': 12,  # finite cooldown rounds per task; 0 disables automatic recovery
+    'auto_recovery_cooldown': 300.0,
     'auth_budget': 600.0,
     'login_timeout': 60.0,
     'challenge_timeout': 120.0,
@@ -61,6 +63,7 @@ def validate_config(config):
         'start_interval': None, 'crawl_days': 1, 'days_interval': 1,
         'recycle_tasks': 1, 'memory_limit_mb': 1, 'disk_reserve_mb': 0,
         'max_response_bytes': 1, 'max_result_bytes': 1, 'max_candidates': 1, 'max_rows': 1,
+        'auto_recovery_rounds': 0,
     }
     for key, minimum in integer_minima.items():
         value = config[key]
@@ -101,7 +104,8 @@ def validate_config(config):
     nonnegative_times = {'crawl_interval', 'cooldown_seconds', 'comfort_timeout'}
     for key in ('attempt_timeout', 'task_budget', 'auth_budget', 'startup_timeout', 'close_timeout',
                 'action_timeout', 'navigation_timeout', 'login_timeout', 'challenge_timeout',
-                'standalone_auth_timeout', 'crawl_interval', 'cooldown_seconds', 'comfort_timeout'):
+                'standalone_auth_timeout', 'crawl_interval', 'cooldown_seconds', 'comfort_timeout',
+                'auto_recovery_cooldown'):
         value = config[key]
         if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
                 or (value < 0 if key in nonnegative_times else value <= 0)):

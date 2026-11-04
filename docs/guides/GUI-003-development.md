@@ -1,7 +1,7 @@
 # 开发与验证指南
 
 > ID: GUI-003 · Status: Current
-> Created: 2026-11-01 · Updated: 2026-11-02
+> Created: 2026-11-01 · Updated: 2026-11-05
 > Purpose: 说明维护源码、生成独立单文件和运行自动化验证的方法。
 
 ## 维护源码与分发文件
@@ -56,13 +56,25 @@ python ctrip_flights_scraper.py --check-environment
 
 ## 受控故障恢复
 
-`tests/e2e/run_incident_recovery.py` 使用真实 Camoufox、生产父子进程和 CLI 入口，在本地拦截全部页面请求，无需账号或访问携程。它将当前单文件复制到空验证目录，依次验证正常任务提交、协议错误暂停、导航错误重试耗尽、普通恢复不扩额度，以及显式追加额度后继续原批次。
+`tests/e2e/run_incident_recovery.py` 使用真实 Camoufox、生产父子进程和 CLI 入口，在本地拦截全部页面请求，无需账号或访问携程。它显式关闭自动冷却恢复，将当前单文件复制到空验证目录，依次验证正常任务提交、协议错误暂停、导航错误重试耗尽、普通恢复不扩额度，以及显式追加额度后继续原批次。
 
 ```bash
 python tests/e2e/run_incident_recovery.py --output artifacts/recovery-check
 ```
 
 每次使用新的空目录。`acceptance.json` 保存成品摘要、各阶段退出码和验收结果，`events.jsonl` 保存受控请求事件；同时检查缺列表的未完成通知能够继续等待、已完成 CSV 和 meta 不变、原始计划不变、人工恢复记录进入结果凭据。该场景用于验证恢复链路，不代表真实代理或账号已通过验收。
+
+## 受控主进程生命周期
+
+`tests/e2e/run_lifecycle_recovery.py` 在 Linux / WSL 下启动真实 CLI 子进程和 Camoufox，使用本地拦截的四个任务验证固定 `--run-id`、重复启动保护、有序 SIGTERM、父进程 SIGKILL 后恢复，以及网络故障耗尽后的有限自动冷却续行。完成后再次启动同一名称，应直接退出，不创建新 worker 或改写既有结果。
+
+```bash
+python tests/e2e/run_lifecycle_recovery.py --output artifacts/lifecycle-check
+```
+
+可用 `--artifact /path/to/ctrip_flights_scraper.py` 指定分发成品。脚本会复制该文件到验证目录，缩短测试专用等待时间，并为每次 CLI 保存独立 stdout/stderr；`acceptance.json` 保存成品摘要、信号结果、自动恢复记录及计划/结果一致性检查。每次使用新的空输出目录。
+
+该控制器只重启自己创建的测试进程，不安装 systemd 服务或 Windows 计划任务，也不验证云平台会话回收、真实代理、账号或长期资源曲线。实际托管步骤及这些边界见[长任务托管与无人值守恢复](OPS-001-unattended-runs.md)。
 
 ## 受控长跑
 

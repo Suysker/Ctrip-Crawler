@@ -85,6 +85,34 @@ def test_command_credentials_and_embedded_payloads_are_not_replayed_in_diagnosti
         assert secret not in text
 
 
+@pytest.mark.parametrize('status', [None, 503])
+def test_network_summary_survives_parent_sanitization_without_raw_requests(status):
+    app = load_sections('imports')
+    network = {'response_kind': 'search', 'http_status': status, 'method': 'POST',
+               'request_failed': True, 'failed_request_count': 2,
+               'search_responses_received': 1, 'browser_error_code': 'NS_ERROR_PROXY_FORBIDDEN'}
+    error = app.CrawlerError('response_timeout', 'Search did not finish', diagnostic={'network': dict(
+        network, url='https://private.invalid/?token=private-token', headers={'cookie': 'private-cookie'})})
+    child = app.make_diagnostic(error, stage='collect.wait_response')
+    parent = app.make_diagnostic(app.CrawlerError('response_timeout', child['message'], diagnostic=child))
+    assert child['network'] == network
+    assert parent['network'] == network
+    assert 'private-token' not in json.dumps(parent)
+    assert 'private-cookie' not in json.dumps(parent)
+
+
+def test_network_summary_rejects_invalid_enums_types_and_negative_counts():
+    app = load_sections('imports')
+    error = app.CrawlerError('network_error', 'Network failed', diagnostic={'network': {
+        'response_kind': 'https://private.invalid/', 'method': 'private-method',
+        'http_status': True, 'request_failed': 'private-failure-payload',
+        'failed_request_count': -1, 'search_responses_received': False,
+        'browser_error_code': 'https://private.invalid/?token=private-token'}})
+    diagnostic = app.make_diagnostic(error)
+    assert not diagnostic.get('network')
+    assert 'private' not in json.dumps(diagnostic)
+
+
 class DiagnosticSession:
     def __init__(self, config, *unused):
         self.config = config
@@ -95,6 +123,12 @@ class DiagnosticSession:
 
     async def collect(self, task, timeout):
         kind = self.config['_diagnostic_kind']
+        if kind == 'proxy_denied':
+            from playwright.async_api import Error
+            error = Error('Page.goto: NS_ERROR_PROXY_FORBIDDEN')
+            error.diagnostic = {'network': {'response_kind': 'navigation', 'request_failed': True,
+                                           'failed_request_count': 1, 'search_responses_received': 0}}
+            raise error
         if kind == 'known_browser':
             from playwright.async_api import Error
             raise Error('browser transport lost for current-user')
@@ -113,12 +147,13 @@ def diagnostic_worker(connection, config, identity, state):
     app.worker_main(connection, config, identity, state)
 
 
-@pytest.mark.parametrize('kind,code,error_type', [
-    ('unknown', 'worker_error', 'ValueError'),
-    ('known_browser', 'browser_error', 'Error'),
-    ('browser_timeout', 'response_timeout', 'TimeoutError'),
+@pytest.mark.parametrize('kind,code,error_type,excerpt', [
+    ('unknown', 'worker_error', 'ValueError', 'conversion'),
+    ('known_browser', 'browser_error', 'Error', 'browser'),
+    ('browser_timeout', 'response_timeout', 'TimeoutError', 'browser'),
+    ('proxy_denied', 'proxy_access_denied', 'Error', 'NS_ERROR_PROXY_FORBIDDEN'),
 ])
-def test_real_worker_preserves_safe_diagnostics_and_does_not_retry_programming_errors(kind, code, error_type):
+def test_real_worker_preserves_safe_diagnostics_and_does_not_retry_programming_errors(kind, code, error_type, excerpt):
     if kind != 'unknown':
         pytest.importorskip('playwright.async_api')
     app = load_sections('imports', 'config', 'worker')
@@ -136,7 +171,54 @@ def test_real_worker_preserves_safe_diagnostics_and_does_not_retry_programming_e
     assert diagnostic['frames']
     assert 'current-user' not in json.dumps(diagnostic)
     assert 'current-password' not in str(caught.value)
-    assert 'conversion' in diagnostic['message'] if kind == 'unknown' else 'browser' in diagnostic['message']
+    assert excerpt in diagnostic['message']
+    if kind == 'proxy_denied':
+        assert diagnostic['network']['browser_error_code'] == 'NS_ERROR_PROXY_FORBIDDEN'
+        assert diagnostic['network']['response_kind'] == 'navigation'
+        assert diagnostic['network']['failed_request_count'] == 1
+
+
+@pytest.mark.parametrize('symbol,expected', [
+    ('NS_ERROR_PROXY_UNAUTHORIZED', 'proxy_access_denied'),
+    ('NS_ERROR_PROXY_FORBIDDEN', 'proxy_access_denied'),
+    ('NS_ERROR_PROXY_AUTHENTICATION_FAILED', 'proxy_access_denied'),
+    ('NS_ERROR_PROXY_NETWORK_AUTHENTICATION_REQUIRED', 'proxy_access_denied'),
+    ('NS_ERROR_PROXY_CONNECTION_REFUSED', 'proxy_unavailable'),
+    ('NS_ERROR_UNKNOWN_PROXY_HOST', 'proxy_unavailable'),
+    ('NS_ERROR_PROXY_REQUEST_TIMEOUT', 'proxy_unavailable'),
+    ('NS_ERROR_PROXY_GATEWAY_TIMEOUT', 'proxy_unavailable'),
+    ('NS_ERROR_PROXY_BAD_GATEWAY', 'proxy_unavailable'),
+    ('NS_ERROR_PROXY_TOO_MANY_REQUESTS', 'proxy_unavailable'),
+    ('NS_ERROR_CONNECTION_REFUSED', 'network_error'),
+    ('NS_ERROR_NET_TIMEOUT', 'network_error'),
+    ('NS_ERROR_NET_RESET', 'network_error'),
+    ('NS_ERROR_NET_INTERRUPT', 'network_error'),
+    ('NS_ERROR_UNKNOWN_HOST', 'network_error'),
+    ('NS_ERROR_DEFINITIVE_UNKNOWN_HOST', 'network_error'),
+    ('NS_ERROR_OFFLINE', 'network_error'),
+])
+def test_firefox_network_codes_keep_their_failure_layer_including_startup(symbol, expected):
+    browser = pytest.importorskip('playwright.async_api')
+    app = load_sections('imports', 'config', 'worker')
+    error = browser.Error('Page.goto: ' + symbol + '\nCall log:\n - navigating to "https://example.invalid/"')
+    assert app._worker_failure_code(error) == expected
+    assert app._worker_failure_code(error, startup=True) == expected
+
+
+@pytest.mark.parametrize('message', [
+    'proxy forbidden: HTTP 403',
+    'Page.goto: navigation failed at https://example.invalid/?error=NS_ERROR_PROXY_FORBIDDEN',
+    'Page.goto: NS_ERROR_PROXY_FORBIDDEN_SUFFIX',
+    'Page.goto: SSL_ERROR_UNKNOWN_ISSUER',
+    'Page.goto: NS_BINDING_ABORTED',
+    'locator expected text "NS_ERROR_PROXY_FORBIDDEN"',
+])
+def test_browser_messages_are_not_classified_by_keywords_or_url_tokens(message):
+    browser = pytest.importorskip('playwright.async_api')
+    app = load_sections('imports', 'config', 'worker')
+    assert app._worker_failure_code(browser.Error(message)) == 'browser_error'
+    assert app._worker_failure_code(browser.Error(message), startup=True) == 'browser_startup'
+    assert app._worker_failure_code(ValueError('Page.goto: NS_ERROR_PROXY_FORBIDDEN')) == 'worker_error'
 
 
 def test_protocol_failure_includes_structure_without_response_or_chain_tokens():

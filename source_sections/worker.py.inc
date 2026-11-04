@@ -117,6 +117,21 @@ def _worker_failure_code(error, *, startup=False):
     if isinstance(error, BrowserTimeout):
         return 'response_timeout'
     if isinstance(error, BrowserError):
+        # Firefox HTTP CONNECT errors: nsHttp::HttpProxyResponseToErrorCode;
+        # transport / DNS symbols: xpcom/base/ErrorList.py. Match exact engine
+        # symbols only: a target HTTP 403 is not a proxy-authentication failure.
+        symbol = firefox_error_code(error)
+        if symbol in ('NS_ERROR_PROXY_UNAUTHORIZED', 'NS_ERROR_PROXY_FORBIDDEN',
+                      'NS_ERROR_PROXY_AUTHENTICATION_FAILED', 'NS_ERROR_PROXY_NETWORK_AUTHENTICATION_REQUIRED'):
+            return 'proxy_access_denied'
+        if symbol in ('NS_ERROR_PROXY_CONNECTION_REFUSED', 'NS_ERROR_UNKNOWN_PROXY_HOST',
+                      'NS_ERROR_PROXY_REQUEST_TIMEOUT', 'NS_ERROR_PROXY_GATEWAY_TIMEOUT',
+                      'NS_ERROR_PROXY_BAD_GATEWAY', 'NS_ERROR_PROXY_TOO_MANY_REQUESTS'):
+            return 'proxy_unavailable'
+        if symbol in ('NS_ERROR_CONNECTION_REFUSED', 'NS_ERROR_NET_TIMEOUT', 'NS_ERROR_NET_RESET',
+                      'NS_ERROR_NET_INTERRUPT', 'NS_ERROR_UNKNOWN_HOST',
+                      'NS_ERROR_DEFINITIVE_UNKNOWN_HOST', 'NS_ERROR_OFFLINE'):
+            return 'network_error'
         return 'browser_startup' if startup else 'browser_error'
     return 'worker_error'
 
