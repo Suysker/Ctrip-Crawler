@@ -179,11 +179,17 @@ def comfort_request_identity(payload, task, aliases):
 
 class SearchChain:
     """Track linked snapshots and pending notices until explicit completion."""
+    _SNAPSHOT_FIELDS = ("flightItineraryList", "currency", "currencyCode")
+
     def __init__(self, task):
         self.task = task
         self.search_id = None
         self.transaction_id = None
-        self.itineraries = None
+        self._snapshot = None
+
+    @property
+    def itineraries(self):
+        return self._snapshot["flightItineraryList"] if self._snapshot is not None else None
 
     def matches_request(self, path, method, request_payload):
         if method != "POST" or not search_request_matches(request_payload, self.task):
@@ -233,15 +239,40 @@ class SearchChain:
         # later pull carries no itineraries, while still applying isFinished.
         # Nonempty responses replace the snapshot; they are never appended.
         if itineraries is not None and (itineraries or self.itineraries is None):
-            self.itineraries = itineraries
+            self._snapshot = {field: data[field] for field in self._SNAPSHOT_FIELDS if field in data}
         if not context["finished"]:
             return None
         if itineraries is not None and (itineraries or not self.itineraries):
             return payload
         completed = copy.deepcopy(payload)
-        completed["data"]["flightItineraryList"] = copy.deepcopy(self.itineraries)
-        self.itineraries = None
+        # The currency describes the retained quotes, so use the same response
+        # for both instead of taking currency from the completion notice.
+        for field in self._SNAPSHOT_FIELDS:
+            completed["data"].pop(field, None)
+        completed["data"].update(copy.deepcopy(self._snapshot))
+        self._snapshot = None
         return completed
+
+
+def _rate_limit_error(retry_after):
+    delay = None
+    if retry_after:
+        try:
+            delay = float(retry_after)
+        except ValueError:
+            from email.utils import parsedate_to_datetime
+            try:
+                delay = (parsedate_to_datetime(retry_after) - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                raise CrawlerError("protocol_changed", "The service supplied an invalid Retry-After header")
+        if not math.isfinite(delay):
+            raise CrawlerError("protocol_changed", "The service supplied an invalid Retry-After header")
+        delay = max(0, delay)
+    return CrawlerError("rate_limited", "The service requested a cooling period", retry_after=delay)
+
+
+def _comfort_outstanding(queue, traffic):
+    return len(traffic["pending"]) + queue.qsize() + traffic["reading"]
 
 
 class BrowserSession:
@@ -278,23 +309,24 @@ class BrowserSession:
 
     async def _read_json(self, response):
         if response.status == 429:
-            retry_after = response.headers.get("retry-after")
-            delay = None
-            if retry_after:
-                try:
-                    delay = max(0, float(retry_after))
-                except ValueError:
-                    from email.utils import parsedate_to_datetime
-                    try:
-                        delay = max(0, (parsedate_to_datetime(retry_after) - datetime.now(timezone.utc)).total_seconds())
-                    except (TypeError, ValueError, OverflowError):
-                        raise CrawlerError("protocol_changed", "The service supplied an invalid Retry-After header")
-            raise CrawlerError("rate_limited", "The service requested a cooling period", retry_after=delay)
+            raise _rate_limit_error(response.headers.get("retry-after"))
         if response.status >= 500:
             raise CrawlerError("network_error", "The target service is temporarily unavailable")
         if response.status != 200:
             raise CrawlerError("site_blocked", "The target interface did not return a successful HTTP status")
-        body = await response.body()
+        from playwright.async_api import Error as BrowserError
+        try:
+            body = await response.body()
+        except BrowserError as exc:
+            # A 200 response only establishes headers. Correlate body transport
+            # evidence with this request, not another failure on the page.
+            failure = response.request.failure
+            exc.diagnostic = {"network": {
+                "response_body_failed": True,
+                "response_request_failed": bool(failure),
+                "response_request_error_code": firefox_error_code(failure) if failure else None,
+            }}
+            raise
         if len(body) > self.config.get("max_response_bytes", 32 * 1024 * 1024):
             raise CrawlerError("response_too_large", "A target response exceeds the configured size limit")
         try:
@@ -327,137 +359,189 @@ class BrowserSession:
     async def _collect_comfort(self, page, task, rows, queue, deadline, errors, traffic):
         from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeout
         aliases = comfort_target_aliases(rows)
-        responses, seen, triggered = [], set(), set()
         targets = set(aliases.values())
-        capacity = self.config.get("max_candidates", 64)
+        values, readers, tails = {}, set(), {}
+        traffic["aliases"] = aliases
+        # Listeners start before the core result establishes eligible identities.
+        for kind in ("sent", "received", "failed"):
+            counts = {}
+            for number, count in traffic[kind].items():
+                if number in aliases:
+                    operating = aliases[number]
+                    counts[operating] = counts.get(operating, 0) + count
+            traffic[kind] = counts
+        traffic["pending"] = {request: number for request, number in traffic["pending"].items()
+                              if number in aliases}
+        early_limit = next((item for item in traffic["limits"].items() if item[0] in aliases), None)
+        traffic["limits"] = dict([early_limit]) if early_limit is not None else {}
+        visited = set().union(*(traffic[kind] for kind in ("sent", "received", "failed")))
+        read_failure = None
 
-        def truncate():
-            traffic["truncated"] = True
-            errors.add("response_too_large")
+        def action_ms(until):
+            return max(1, min(self.config.get("action_timeout", 10),
+                              until - time.monotonic()) * 1000)
 
-        def timeout_ms():
-            return max(1, min(self.config.get("action_timeout", 10), deadline - time.monotonic()) * 1000)
+        def requested(number):
+            return any(number in traffic[kind] for kind in ("sent", "received", "failed"))
 
-        def flights(kind):
-            return {aliases[number] for number, key in traffic[kind] if number in aliases}
-
-        def resolved():
-            return flights("received") | flights("failed")
-
-        async def check_limit():
-            for response in traffic["limits"].values():
-                if comfort_request_identity(response.request.post_data_json, task, aliases) is not None:
-                    await self._read_json(response)
-
-        async def read(response):
+        async def read(operating, response, previous):
             try:
-                if response.request.method != "POST":
-                    return
-                identity = comfort_request_identity(response.request.post_data_json, task, aliases)
-                if identity is None or response in seen:
-                    return
-                if len(seen) >= capacity:
-                    truncate()
-                    return
-                seen.add(response)
-                traffic["http_status"] = response.status
-                payload = await asyncio.wait_for(self._read_json(response), max(0.01, deadline - time.monotonic()))
-                responses.append({"flight_no": identity[0], "payload": payload})
+                # Preserve response order for the same operating flight while
+                # allowing another flight's body to finish independently.
+                if previous is not None:
+                    await previous
+                payload = await asyncio.wait_for(self._read_json(response), deadline - time.monotonic())
+                _record_comfort_values(values, operating, payload)
             except CrawlerError as exc:
-                if response.status == 429:
+                if exc.code == "rate_limited":
                     raise
                 errors.add(exc.code)
             except (ValueError, TypeError):
                 errors.add("protocol_changed")
-            except (asyncio.TimeoutError, BrowserError):
+            except asyncio.TimeoutError:
+                errors.add("response_body_timeout")
+            except BrowserError:
                 errors.add("network_error")
 
-        async def drain():
-            while not queue.empty() and time.monotonic() < deadline:
-                await read(queue.get_nowait())
+        def reader_done(job, operating):
+            nonlocal read_failure
+            readers.discard(job)
+            traffic["reading"] -= 1
+            if tails.get(operating) is job:
+                tails.pop(operating)
+            if not job.cancelled():
+                read_failure = read_failure or job.exception()
+            traffic["changed"].set()
 
-        async def wait_for_flights(numbers, until):
-            while time.monotonic() < until and not traffic["truncated"]:
-                traffic["changed"].clear()
-                await drain()
-                if not numbers - resolved():
+        def check_health():
+            if traffic["limits"]:
+                traffic["http_status"] = 429
+                raise _rate_limit_error(next(iter(traffic["limits"].values())))
+            if read_failure is not None:
+                raise read_failure
+
+        def pump_responses():
+            check_health()
+            while not queue.empty() and time.monotonic() < deadline:
+                number, response = queue.get_nowait()
+                operating = aliases.get(number)
+                if operating is None:
+                    continue
+                traffic["http_status"] = response.status
+                job = asyncio.create_task(read(operating, response, tails.get(operating)))
+                traffic["reading"] += 1
+                readers.add(job)
+                tails[operating] = job
+                job.add_done_callback(lambda done, number=operating: reader_done(done, number))
+
+        async def wait_for_change(ready, until):
+            while True:
+                pump_responses()
+                remaining = until - time.monotonic()
+                if ready() or remaining <= 0:
                     return
+                traffic["changed"].clear()
                 try:
-                    await asyncio.wait_for(traffic["changed"].wait(), until - time.monotonic())
+                    await asyncio.wait_for(traffic["changed"].wait(), remaining)
                 except asyncio.TimeoutError:
                     return
 
-        await check_limit()
-        await drain()
-        if targets - resolved() - flights("sent") and time.monotonic() < deadline:
-            locators = page.locator(".flight-item .plane-No")
-            try:
-                await locators.first.wait_for(state="attached", timeout=timeout_ms())
-                index = 0
-                hover_failures = {}
-                while time.monotonic() < deadline and not traffic["truncated"]:
-                    await drain()
-                    needed = targets - resolved() - flights("sent") - triggered
-                    if not needed:
-                        break
-                    count = await locators.count()
-                    if index >= count:
-                        # Wheel over the list so its normal scroll container loads the next cards.
-                        await locators.last.scroll_into_view_if_needed(timeout=timeout_ms())
-                        box = await locators.last.bounding_box(timeout=timeout_ms())
-                        if box is None:
-                            errors.add("page_details_not_loaded")
+        def has_slot():
+            return _comfort_outstanding(queue, traffic) < queue.maxsize or traffic["truncated"]
+
+        try:
+            pump_responses()
+            if targets - visited and time.monotonic() < deadline and not traffic["truncated"]:
+                locators = page.locator(".flight-item .plane-No")
+                timeout_reason = "page_cards_timeout"
+                try:
+                    await locators.first.wait_for(state="attached", timeout=action_ms(deadline))
+                    index = 0
+                    while time.monotonic() < deadline and not traffic["truncated"]:
+                        await wait_for_change(has_slot, deadline)
+                        now = time.monotonic()
+                        if now >= deadline or traffic["truncated"]:
                             break
-                        await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                        await page.mouse.wheel(0, 700)
-                        try:
-                            await page.wait_for_function("count => document.querySelectorAll('.flight-item .plane-No').length > count",
-                                                         arg=count, timeout=max(1, min(1.5, deadline - time.monotonic()) * 1000))
-                        except BrowserTimeout:
-                            errors.add("page_details_not_loaded")
-                            break
-                        continue
-                    locator = locators.nth(index)
-                    # The aircraft label is a child element; the flight number is direct text.
-                    number = await locator.evaluate("el => Array.from(el.childNodes).filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim()", timeout=timeout_ms())
-                    operating = aliases.get(number)
-                    if operating not in needed:
+                        count = await locators.count()
+                        if index >= count:
+                            if all(number in visited or requested(number) for number in targets):
+                                break
+                            timeout_reason = "page_pagination_timeout"
+                            await locators.last.scroll_into_view_if_needed(timeout=action_ms(deadline))
+                            box = await locators.last.bounding_box(timeout=action_ms(deadline))
+                            if box is None:
+                                errors.add("page_details_not_loaded")
+                                break
+                            pump_responses()
+                            await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                            await page.mouse.wheel(0, 700)
+                            await page.wait_for_function(
+                                "count => document.querySelectorAll('.flight-item .plane-No').length > count",
+                                arg=count, timeout=action_ms(deadline))
+                            continue
+                        # Share the remaining time across unvisited targets.
+                        # Inspecting, hovering and native request startup spend
+                        # the same slice rather than receiving separate timeouts.
+                        card_deadline = now + min(self.config.get("action_timeout", 10),
+                                                  (deadline - now) / max(1, len(targets) - len(visited)))
+                        locator = locators.nth(index)
                         index += 1
-                        continue
-                    if len(triggered) >= capacity or (operating not in hover_failures and len(hover_failures) >= capacity):
-                        truncate()
-                        break
-                    try:
-                        await page.mouse.move(0, 0)
-                        await locator.hover(timeout=timeout_ms())
-                    except BrowserTimeout:
-                        errors.add("page_details_timeout")
-                        hover_failures[operating] = hover_failures.get(operating, 0) + 1
-                        if hover_failures[operating] >= 2:
-                            index += 1
-                        continue
-                    triggered.add(operating)
-                    index += 1
-                    await wait_for_flights({operating}, min(deadline, time.monotonic() + 1.5))
-            except BrowserTimeout:
-                errors.add("page_details_timeout")
-            except BrowserError:
-                errors.add("network_error")
-        pending = (flights("sent") | triggered) - resolved()
-        while pending and time.monotonic() < deadline and not traffic["truncated"]:
-            await wait_for_flights(pending, deadline)
-            pending = (flights("sent") | triggered) - resolved()
-        await check_limit()
-        await drain()
-        if flights("failed"):
+                        try:
+                            number = await locator.evaluate(
+                                "el => Array.from(el.childNodes).filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim()",
+                                timeout=action_ms(card_deadline))
+                        except BrowserTimeout:
+                            errors.add("page_card_read_timeout")
+                            continue
+                        operating = aliases.get(number)
+                        if operating is None or operating in visited:
+                            continue
+                        visited.add(operating)
+                        for _ in range(2):
+                            await wait_for_change(has_slot, card_deadline)
+                            if requested(operating) or time.monotonic() >= card_deadline or traffic["truncated"]:
+                                break
+                            try:
+                                await page.mouse.move(0, 0)
+                                pump_responses()
+                                await locator.hover(timeout=action_ms(card_deadline))
+                            except BrowserTimeout:
+                                errors.add("page_hover_timeout")
+                                continue
+                            await wait_for_change(lambda: requested(operating) or traffic["truncated"],
+                                                  card_deadline)
+                            if not requested(operating):
+                                errors.add("page_hover_no_request")
+                            break
+                except BrowserTimeout:
+                    errors.add(timeout_reason)
+                except BrowserError:
+                    errors.add("network_error")
+            await wait_for_change(lambda: not _comfort_outstanding(queue, traffic), deadline)
+            pump_responses()
+        finally:
+            if time.monotonic() >= deadline:
+                if any(not job.done() for job in readers):
+                    errors.add("response_body_timeout")
+                if traffic["pending"]:
+                    errors.add("response_wait_timeout")
+            active = tuple(readers)
+            for job in active:
+                job.cancel()
+            outcomes = await asyncio.gather(*active, return_exceptions=True)
+        check_health()
+        # A completed reader may be gathered before its done callback runs.
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException) and not isinstance(outcome, asyncio.CancelledError):
+                raise outcome
+        if traffic["failed"]:
             errors.add("network_error")
-        if targets - resolved() and time.monotonic() >= deadline:
+        if time.monotonic() >= deadline and (targets - values.keys() or traffic["pending"] or not queue.empty()):
             errors.add("comfort_budget_exhausted")
-        result = apply_comfort(rows, responses)
+        result = _merge_comfort_rows(rows, values)
         result["comfort_summary"].update(
-            requested_flights=len(flights("sent")), responded_flights=len(flights("received")),
-            requests_sent=sum(count for (number, key), count in traffic["sent"].items() if number in aliases),
-            responses_received=sum(count for (number, key), count in traffic["received"].items() if number in aliases),
+            requested_flights=len(traffic["sent"]), responded_flights=len(traffic["received"]),
+            requests_sent=sum(traffic["sent"].values()), responses_received=sum(traffic["received"].values()),
             truncated=traffic["truncated"])
         if errors and result["comfort_status"] in ("partial", "unavailable"):
             result["comfort_reason"] = ";".join(sorted(errors | {result["comfort_reason"]}))
@@ -470,9 +554,14 @@ class BrowserSession:
         queue = asyncio.Queue(maxsize=self.config.get("max_candidates", 64))
         comfort_queue = asyncio.Queue(maxsize=self.config.get("max_candidates", 64))
         comfort_errors = set()
-        traffic = {"sent": {}, "received": {}, "failed": {}, "limits": {}, "http_status": None,
+        traffic = {"sent": {}, "received": {}, "failed": {}, "limits": {}, "pending": {},
+                   "aliases": None, "reading": 0, "http_status": None,
                    "changed": asyncio.Event(), "truncated": False}
         capacity = self.config.get("max_candidates", 64)
+        # Before the core result arrives, a flight can be named by either its
+        # marketing or operating number. The queue bounds live response work,
+        # independently of how many eligible flights the result contains.
+        identity_capacity = 2 * self.config.get("max_rows", 20000)
         network = {"search_responses_received": 0, "failed_request_count": 0, "request_failed": False}
         statuses = {"navigation": None, "search": None}
         navigation_url = None
@@ -498,26 +587,37 @@ class BrowserSession:
             if request.method != "POST" or request_kind(request) != "comfort":
                 return None
             try:
-                return comfort_request_key(request.post_data_json, task)
+                key = comfort_request_key(request.post_data_json, task)
+                return key[0] if key is not None else None
             except (BrowserError, ValueError, TypeError, KeyError):
                 return None
 
-        def track(kind, key):
+        def truncate_comfort():
+            traffic["truncated"] = True
+            comfort_errors.add("response_too_large")
+            traffic["changed"].set()
+
+        def track(kind, number):
+            if traffic["aliases"] is not None:
+                number = traffic["aliases"].get(number)
+                if number is None:
+                    return False
             values = traffic[kind]
-            if key not in values and len(values) >= capacity:
-                traffic["truncated"] = True
-                comfort_errors.add("response_too_large")
-                traffic["changed"].set()
+            if number not in values and len(values) >= identity_capacity:
+                truncate_comfort()
                 return False
-            values[key] = values.get(key, 0) + 1
+            values[number] = values.get(number, 0) + 1
             traffic["changed"].set()
             return True
 
         def receive_request(request):
             if self.config.get("comft_flight"):
                 key = comfort_key(request)
-                if key is not None:
-                    track("sent", key)
+                if key is not None and track("sent", key):
+                    if _comfort_outstanding(comfort_queue, traffic) >= capacity:
+                        truncate_comfort()
+                    else:
+                        traffic["pending"][request] = key
 
         def receive_failed(request):
             if request_kind(request) is None:
@@ -527,6 +627,7 @@ class BrowserSession:
             if self.config.get("comft_flight"):
                 key = comfort_key(request)
                 if key is not None:
+                    traffic["pending"].pop(request, None)
                     track("failed", key)
 
         def annotate(error):
@@ -534,7 +635,7 @@ class BrowserSession:
                 "comfort" if self.diagnostic_stage == "collect.comfort" else "search")
             status = traffic["http_status"] if kind == "comfort" else statuses[kind]
             diagnostic = dict(getattr(error, "diagnostic", {}) or {})
-            diagnostic.update(stage=self.diagnostic_stage, network={**network, "response_kind": kind,
+            diagnostic.update(stage=self.diagnostic_stage, network={**network, **diagnostic.get("network", {}), "response_kind": kind,
                               "method": "GET" if kind == "navigation" else "POST", "http_status": status})
             error.diagnostic = diagnostic
             return error
@@ -553,14 +654,29 @@ class BrowserSession:
                     overflow = True
             elif self.config.get("comft_flight") and path == "/international/search/api/flight/comfort/getFlightComfort":
                 key = comfort_key(response.request)
-                if key is None or not track("received", key):
+                if key is None:
                     return
+                traffic["pending"].pop(response.request, None)
                 if response.status == 429:
-                    traffic["limits"][key] = response
+                    aliases, limits = traffic["aliases"], traffic["limits"]
+                    if aliases is None:
+                        if key in limits or len(limits) < identity_capacity:
+                            limits.setdefault(key, response.headers.get("retry-after"))
+                        else:
+                            truncate_comfort()
+                    elif key in aliases and not limits:
+                        limits[key] = response.headers.get("retry-after")
+                    track("received", key)
+                    return
+                if not track("received", key):
+                    return
+                if _comfort_outstanding(comfort_queue, traffic) >= capacity:
+                    truncate_comfort()
+                    return
                 try:
-                    comfort_queue.put_nowait(response)
+                    comfort_queue.put_nowait((key, response))
                 except asyncio.QueueFull:
-                    comfort_errors.add("response_too_large")
+                    truncate_comfort()
 
         page.on("request", receive_request)
         page.on("requestfailed", receive_failed)

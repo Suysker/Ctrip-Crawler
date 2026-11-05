@@ -46,7 +46,7 @@ from urllib.parse import urlparse, urlencode
 from zoneinfo import ZoneInfo
 
 SCHEMA_VERSION = 1
-VERSION = '4.1.0'
+VERSION = '4.1.1'
 BROWSER_BUILD = 'official/152.0.4-beta.29'
 RUNTIME_REQUIREMENTS = {
     'camoufox': '0.5.8', 'playwright': '1.60.0', 'fpgen': '1.3.0',
@@ -196,8 +196,12 @@ def make_diagnostic(error, *, stage=None, config=None, command=None):
             summary[key] = value
         elif key == 'http_status' and key in network and value is None:
             summary[key] = None
-    if type(network.get('request_failed')) is bool:
-        summary['request_failed'] = network['request_failed']
+    for key in ('request_failed', 'response_body_failed', 'response_request_failed'):
+        if type(network.get(key)) is bool:
+            summary[key] = network[key]
+    response_symbol = network.get('response_request_error_code')
+    if isinstance(response_symbol, str) and firefox_error_code(response_symbol) == response_symbol:
+        summary['response_request_error_code'] = response_symbol
     if summary:
         result['network'] = summary
     causes = []

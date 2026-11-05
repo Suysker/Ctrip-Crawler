@@ -121,6 +121,37 @@ def test_memory_limit_cannot_skip_descendant_cleanup(app):
                 pass
 
 
+@pytest.mark.skipif(sys.platform != 'linux', reason='Requires a POSIX zombie awaiting its parent')
+@pytest.mark.parametrize('already_exited', [False, True])
+def test_cleanup_accepts_exit_while_another_parent_has_not_reaped(app, already_exited):
+    import psutil
+
+    # The holder owns waitpid and intentionally delays it until cleanup returns.
+    holder = subprocess.Popen([sys.executable, '-c', '''
+import subprocess
+import sys
+child = subprocess.Popen([sys.executable, '-c', sys.argv[1]])
+print(child.pid, flush=True)
+try:
+    sys.stdin.read()
+finally:
+    child.kill()
+    child.wait()
+''', 'pass' if already_exited else 'import time; time.sleep(30)'],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        process = psutil.Process(int(holder.stdout.readline()))
+        if already_exited:
+            deadline = time.monotonic() + 3
+            while process.status() != psutil.STATUS_ZOMBIE and time.monotonic() < deadline:
+                time.sleep(0.01)
+        assert (process.status() == psutil.STATUS_ZOMBIE) is already_exited
+        app._terminate_owned_processes({process.pid: process.create_time()}, timeout=0.2)
+        assert process.status() == psutil.STATUS_ZOMBIE
+    finally:
+        holder.communicate(timeout=5)
+
+
 def test_control_eof_exits_even_when_parent_pid_still_exists_and_event_loop_blocks(app, tmp_path):
     marker = tmp_path / 'blocked.txt'
     cfg = dict(app.DEFAULT_CONFIG, close_timeout=0.2, _blocking_marker=str(marker))

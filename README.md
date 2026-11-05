@@ -107,7 +107,7 @@ python ctrip_flights_scraper.py --resume <run_id> --output ./data
 
 遇到登录失效或人工验证，先处理对应账号，再恢复批次。具体操作见[登录与恢复](docs/guides/GUI-002-usage.md#登录与恢复)。
 
-长期托管可使用固定 `--run-id`：首次创建，之后重启同一命令继续该批次，完成后直接退出。systemd 与 Windows 任务计划的配置见[长任务托管与无人值守恢复](docs/guides/OPS-001-unattended-runs.md)。
+长期托管可使用固定 `--run-id`：首次创建，之后重启同一命令继续该批次，完成后直接退出。systemd、无 systemd 环境下的 Supervisor，以及 Windows 任务计划的配置见[长任务托管与无人值守恢复](docs/guides/OPS-001-unattended-runs.md)。
 
 ## 更多资料
 

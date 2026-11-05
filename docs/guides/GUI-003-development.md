@@ -41,6 +41,8 @@ CTRIP_BROWSER_TESTS=1 python -m pytest tests -q
 
 这些检查覆盖数据转换、账号状态、受控页面交互、进程监督和文件中断恢复。真实站点的响应与登录行为可能变化，受控测试不能替代必要的真实业务核对。验证范围与故障矩阵见 [验证标准](../concepts/CON-002-v4-design.md#16-验证方法与可靠性标准)。
 
+`tests/test_comfort_coverage.py` 用本地页面检查密集航班列表、悬停触发延迟、网络响应延迟和不可交互卡片，记录覆盖计数与耗时。它通过正常页面事件触发请求，不使用接口重放；超过响应队列容量的航班总数也必须能逐批处理。`tests/test_response_body_failure.py` 检查响应体读取失败时保留对应请求的证据，并防止把页面上其他请求的失败归到当前响应。
+
 `tests/test_browser_tls.py` 使用临时自签名证书和本机 HTTPS 服务，验证项目上下文可访问该服务，而同一浏览器的严格校验上下文仍拒绝它。此检查还需要 OpenSSL：将 `openssl` 加入 PATH，或将 `CTRIP_TEST_OPENSSL` 设置为可执行文件路径；缺少时该项会明确跳过。证书和密钥只生成在测试临时目录，不写入系统信任库，不提交到仓库。
 
 ## 独立单文件验证
@@ -75,6 +77,18 @@ python tests/e2e/run_lifecycle_recovery.py --output artifacts/lifecycle-check
 可用 `--artifact /path/to/ctrip_flights_scraper.py` 指定分发成品。脚本会复制该文件到验证目录，缩短测试专用等待时间，并为每次 CLI 保存独立 stdout/stderr；`acceptance.json` 保存成品摘要、信号结果、自动恢复记录及计划/结果一致性检查。每次使用新的空输出目录。
 
 该控制器只重启自己创建的测试进程，不安装 systemd 服务或 Windows 计划任务，也不验证云平台会话回收、真实代理、账号或长期资源曲线。实际托管步骤及这些边界见[长任务托管与无人值守恢复](OPS-001-unattended-runs.md)。
+
+## Supervisor 托管验收
+
+`tests/e2e/run_supervisor_recovery.py` 在 Linux / WSL 中使用实际 Supervisor 和真实 Camoufox，复用上述本地页面场景。先按[托管指南](OPS-001-unattended-runs.md)准备 Supervisor，再运行：
+
+```bash
+python tests/e2e/run_supervisor_recovery.py --output artifacts/supervisor-check
+```
+
+可用 `--supervisord`、`--supervisorctl` 指定已安装的管理器命令，用 `--artifact` 指定待验收的单文件。验收从仓库部署模板生成隔离配置，检查外部 SIGTERM / SIGKILL 后自动重启同一批次、管理器主动停止后保持停止、预期退出码不重启，以及恢复前后的计划和结果摘要。代理、账号和网站请求均由受控场景替代；这不等于已在运行平台安装托管服务。
+
+每次使用新的空输出目录，保留 `acceptance.json`、管理器日志、CLI stdout/stderr 和任务结果。这样可以区分应用暂停、应用被杀与管理器本身退出，而不是仅凭进程存在判断恢复成功。
 
 ## 受控长跑
 

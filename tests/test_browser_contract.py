@@ -136,6 +136,54 @@ class BrowserContractTests(unittest.TestCase):
         self.assertEqual(result['data']['context'],notice['data']['context'])
         self.assertEqual([first,latest,notice],originals)
 
+    def test_completion_notice_keeps_currency_from_the_retained_snapshot(self):
+        from test_processing import itinerary
+
+        for field, notice_fields in (
+            ('currency', {}),
+            ('currencyCode', {}),
+            ('currencyCode', {'flightItineraryList': [], 'currency': 'USD'}),
+        ):
+            with self.subTest(field=field, notice_fields=notice_fields):
+                chain = self.module.SearchChain(task())
+                first = {'status': 0, 'data': {
+                    'context': {'searchId': 'search-1', 'finished': False},
+                    'flightItineraryList': [itinerary(prices=[{'cabin': 'Y', 'adultPrice': 100, 'adultTax': 20}])],
+                    field: 'CNY',
+                }}
+                notice = {'status': 0, 'data': {
+                    'context': {'searchId': 'search-2', 'finished': True}, **notice_fields,
+                }}
+                chain.accept(self.module.SEARCH_API_PATH, 'POST', body(), 200, first)
+                result = chain.accept('/international/search/api/search/pull/search-1', 'POST', body(), 200, notice)
+                observation = self.module.normalize_response(result, task(), {'rename_col': False}, '2027-01-01T00:00:00Z')
+                self.assertEqual(observation['rows'][0]['economy_currency'], 'CNY')
+                self.assertEqual(observation['price_status'], 'complete')
+
+    def test_new_itinerary_snapshot_does_not_inherit_currency_from_the_previous_snapshot(self):
+        from test_processing import itinerary
+
+        for finished in (True, False):
+            with self.subTest(finished=finished):
+                chain = self.module.SearchChain(task())
+                first = {'status': 0, 'data': {
+                    'context': {'searchId': 'search-1', 'finished': False},
+                    'flightItineraryList': [itinerary(identity='old')],
+                    'currency': 'CNY',
+                }}
+                latest = {'status': 0, 'data': {
+                    'context': {'searchId': 'search-2', 'finished': finished},
+                    'flightItineraryList': [itinerary(prices=[{'cabin': 'Y', 'adultPrice': 100, 'adultTax': 20}])],
+                }}
+                chain.accept(self.module.SEARCH_API_PATH, 'POST', body(), 200, first)
+                result = chain.accept('/international/search/api/search/pull/search-1', 'POST', body(), 200, latest)
+                if not finished:
+                    notice = {'status': 0, 'data': {'context': {'searchId': 'search-3', 'finished': True}}}
+                    result = chain.accept('/international/search/api/search/pull/search-2', 'POST', body(), 200, notice)
+                observation = self.module.normalize_response(result, task(), {'rename_col': False}, '2027-01-01T00:00:00Z')
+                self.assertEqual(observation['rows'][0]['economy_currency'], '')
+                self.assertEqual(observation['price_reason'], ['currency_missing'])
+
     def test_empty_final_pull_completes_but_does_not_erase_an_earlier_nonempty_snapshot(self):
         chain=self.module.SearchChain(task())
         partial={'status':0,'data':{'context':{'searchId':'search-1','finished':False},

@@ -51,7 +51,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ctrip-crawler.service
 ```
 
-这些是部署步骤；仓库中的模板不会自行安装或启用服务。容器内若没有运行 systemd，应使用宿主或平台提供的进程托管能力，并保持同样的固定批次与退出策略。
+仓库中的模板需要显式安装并启用。没有 systemd 的 Linux 环境可使用下文的 Supervisor 模板。
 
 模板中的核心策略是：
 
@@ -94,7 +94,33 @@ journalctl -u ctrip-crawler.service --since today
 
 需要停止时使用 `systemctl stop ctrip-crawler.service`。排除故障后使用 `systemctl start ctrip-crawler.service`，保持相同名称和输出目录。若触发了 systemd 启动速率限制，先确认原因，再执行 `systemctl reset-failed ctrip-crawler.service`；这不会重置采集器保存的任务预算或自动恢复轮次。
 
-## 3. Windows：任务计划运行同一个 Python 文件
+## 3. 无 systemd 的 Linux：使用 Supervisor
+
+在平台的常驻服务入口以前台方式运行 Supervisor 4.x。可使用发行版的包，或在独立的 Python 3.12 虚拟环境中安装 `supervisor==4.3.0`，并使用该环境下的 `supervisord` 和 `supervisorctl`。采集器仍使用自己的虚拟环境和准备过浏览器、指纹模型及会话的专用账号。仓库提供 [ctrip-crawler.supervisor.conf](../../deploy/ctrip-crawler.supervisor.conf)，其中的程序、虚拟环境、持久目录和固定批次名称均需按部署环境调整。
+
+迁移已存在的批次时，先停止旧启动器和定时触发，确认采集进程已经退出。将模板的 `--run-id` 与 `--output` 设为已有批次的名称和原始输出目录。首次启动前，为运行账号准备可写的状态目录和本地 Unix socket 路径。独立模板通过权限为 `0600` 的 Unix socket 提供控制接口。若平台已有 `supervisord`，只纳入模板中的 `[program:ctrip-crawler]` 段，沿用平台已有的控制接口。
+
+在部署账号下启动独立模板。生产环境由平台服务入口执行同一条前台命令。
+
+```bash
+supervisord -c /opt/ctrip-crawler/deploy/ctrip-crawler.supervisor.conf
+```
+
+从另一个使用同一账号的终端查看状态或操作服务。
+
+```bash
+supervisorctl -c /opt/ctrip-crawler/deploy/ctrip-crawler.supervisor.conf status ctrip-crawler
+supervisorctl -c /opt/ctrip-crawler/deploy/ctrip-crawler.supervisor.conf stop ctrip-crawler
+supervisorctl -c /opt/ctrip-crawler/deploy/ctrip-crawler.supervisor.conf start ctrip-crawler
+```
+
+`autorestart=unexpected` 和 `exitcodes=0,2,3,4,130` 让完成和明确需要人工处理的退出停留在 `EXITED`。`startsecs=0` 使环境检查等快速退出也按应用退出码处理。外部 SIGTERM 后的退出 143，以及进程被 SIGKILL 终止，均触发同批次重启。`supervisorctl stop` 将进程置于 `STOPPED`，不触发自动重启。模板的 `autostart=true` 会在 Supervisor 自身重新启动时拉起程序。需要在平台重启后仍保持暂停时，同时在平台侧停用该服务入口。[Supervisor 配置说明](https://docs.supervisord.org/configuration.html) · [进程状态说明](https://docs.supervisord.org/subprocess.html)
+
+Supervisor 停止程序时先向主进程发送 SIGTERM。模板允许 960 秒供默认最长操作收尾并清理子进程，超时后 Supervisor 可向进程组发 SIGKILL。提高应用操作或关闭超时时，应同步调整 `stopwaitsecs` 和外层平台的停止宽限。Supervisor 的 `startretries` 只约束启动失败，已经进入 `RUNNING` 的程序发生意外退出时可连续重启。平台应保留 Supervisor 自身的日志并监测持续重启。[Supervisor 配置说明](https://docs.supervisord.org/configuration.html)
+
+模板将主程序 stdout、stderr 写入独立轮转文件。`supervisord.log` 记录每次启动的 PID、退出码或信号。结合 `crawler.log` 和批次 `progress.json` 区分程序启动失败、进程被终止和业务暂停。持续拒绝的代理故障仍按应用保存的自动恢复预算处理，Supervisor 重启不会清除预算。
+
+## 4. Windows：任务计划运行同一个 Python 文件
 
 Windows 使用同一虚拟环境、同一采集脚本及固定 `--run-id`。先在计划任务将使用的账号下完成环境检查和必要登录，再配置后台无头运行；交互式短信验证不应依赖无人登录的后台桌面。
 
@@ -124,10 +150,16 @@ Microsoft 的 [任务设置参考](https://learn.microsoft.com/en-us/powershell/
 
 需要人工停止时，使用任务计划的“结束”或 Stop-ScheduledTask；如不再允许后续触发，同时禁用任务。只结束 Python 进程会被桥接视为应恢复的进程故障。任务计划停止可能直接杀死进程，不能当作 POSIX SIGTERM 的优雅停止。再次启动仍保持相同名称，由保存的计划和预留预算恢复。诊断任务未启动或启动后立即退出时，查看 `task-launcher.log` 指向的 stderr、任务历史和 Event Viewer 中的 `Microsoft-Windows-TaskScheduler/Operational`，而不是只看采集器日志。
 
-## 4. 保留运行证据与宿主边界
+## 5. 处理代理与响应读取故障
+
+`proxy_access_denied` 或 `proxy_unavailable` 反复出现时，先检查运行平台提供的代理连接参数、认证材料和出口授权。若同一连接的用户名或口令已更新，先通过托管器停止批次，更新实际运行副本的 `proxy` 配置，再用原 `--run-id` 和原输出目录启动。批次计划中的 `proxy_identity_version=2` 已允许这种更新，端点、协议或 bypass 变化仍会拒绝恢复。旧绑定才需要一次显式迁移，已耗尽的任务也可能需要一次显式追加额度。操作方式见[代理配置](GUI-002-usage.md#舒适度与代理)和[恢复说明](GUI-002-usage.md#登录与恢复)。
+
+搜索响应出现 `collect.decode_response` 错误时，HTTP 200 说明响应头已到达。`response_body_failed` 记录读取响应体失败，`response_request_failed` 和 `response_request_error_code` 记录读取失败当时已观察到的同一请求失败事件及浏览器错误符号。`response_request_failed=false` 表示当时还未观察到该事件，后续仍可能发生。全页 `request_failed` 汇总本次页面已监听的导航、搜索或舒适度请求，其中可能不含当前响应所属的请求。
+
+## 6. 保留运行证据与宿主边界
 
 故障后保留原批次目录、实际启动命令、各次进程 PID/创建时间、退出码、完整 stdout/stderr，以及对应时间段的内核或平台记录。`process_interrupted` 不是宿主退出原因；OOM 需要内核/cgroup 证据，平台会话回收需要平台记录。
 
-systemd 或任务计划只在其自身仍存活且允许启动时提供进程恢复。整个容器、虚拟机或宿主被停止、磁盘丢失、平台禁用任务时，脚本不能自行保证继续运行。输出目录应放在平台提供的持久存储上，宿主启动策略应由平台配置。应用的 `memory_limit_mb` 只约束监测到的 worker 进程树，不等于容器总内存上限，不能替代宿主资源规划。
+systemd、Supervisor 或任务计划只在自身存活且允许启动时提供进程恢复。运行在容器内的 Supervisor 会随整个容器停止，容器重建需要外层平台的启动策略。输出目录应放在平台提供的持久存储上。`nohup`、进程脱离父终端和普通定时启动都无法提供退出监控或同批次自动重启。应用的 `memory_limit_mb` 只约束监测到的 worker 进程树，容器总内存上限由平台配置。
 
-仓库内的本地终止恢复验收用于检查固定批次、信号与文件恢复链路，不代表已经在目标主机安装、启用或完成了系统服务的运行验收。
+仓库内的受控验收覆盖固定批次、信号、文件恢复和 Supervisor 的退出策略。目标主机的启动入口、容器持久卷、退出事件和平台代理需要按实际部署环境核对。

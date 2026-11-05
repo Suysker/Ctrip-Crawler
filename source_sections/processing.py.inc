@@ -316,15 +316,23 @@ def _processing_comfort_data(payload):
     return values
 
 
+def _record_comfort_values(by_flight, flight_no, payload):
+    values = _processing_comfort_data(payload)
+    if values is not None:
+        by_flight.setdefault(flight_no, {}).update(values)
+
+
 def apply_comfort(rows, responses):
     """Attach known comfort responses by operating flight, preserving quotes."""
     by_flight = {}
     for response in responses:
         if not isinstance(response, dict) or not isinstance(response.get("flight_no"), str):
             continue
-        values = _processing_comfort_data(response.get("payload"))
-        if values is not None:
-            by_flight.setdefault(response["flight_no"], {}).update(values)
+        _record_comfort_values(by_flight, response["flight_no"], response.get("payload"))
+    return _merge_comfort_rows(rows, by_flight)
+
+
+def _merge_comfort_rows(rows, by_flight):
     result = []
     statuses = []
     targets, covered = set(), set()

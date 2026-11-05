@@ -41,25 +41,40 @@ class _ParentConnection:
 
 def _terminate_owned_processes(identities, timeout=2.0):
     import psutil
+
+    def is_live(process):
+        try:
+            if not process.is_running():
+                return False
+            if process.status() != psutil.STATUS_ZOMBIE:
+                return True
+            # A zombie has already exited. Only its parent can reap it.
+            if process.ppid() == os.getpid():
+                process.wait(timeout=0)
+            return False
+        except psutil.NoSuchProcess:
+            return False
+
     processes = []
     for pid, created in reversed(list(identities.items())):
         try:
             process = psutil.Process(int(pid))
-            if process.create_time() == created:
-                processes.append(process)
+            if process.create_time() == created and is_live(process):
                 process.terminate()
+                processes.append(process)
         except psutil.NoSuchProcess:
             continue
         except psutil.AccessDenied as exc:
             raise CrawlerError('process_cleanup', '无法终止当前运行拥有的进程') from exc
     _, alive = psutil.wait_procs(processes, timeout=timeout)
+    alive = [process for process in alive if is_live(process)]
     for process in alive:
         try:
             process.kill()
         except psutil.NoSuchProcess:
             pass
     _, alive = psutil.wait_procs(alive, timeout=timeout)
-    if alive:
+    if any(is_live(process) for process in alive):
         raise CrawlerError('process_cleanup', '自有浏览器进程未能在关闭期限内退出')
 
 
